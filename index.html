@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reactive Captions</title>
+  <meta name="description" content="Automatic captions that react to how things are said. Runs in your browser; your video never leaves your device." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Montserrat:wght@900&family=Anton&family=Poppins:wght@800&family=Inter:wght@600;800&display=swap" />
+  <link rel="stylesheet" href="src/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2317161F'/%3E%3Crect x='6' y='17' width='4' height='7' rx='1' fill='%23ECEAF2'/%3E%3Crect x='12' y='9' width='4' height='15' rx='1' fill='%23FFD23F'/%3E%3Crect x='18' y='14' width='4' height='10' rx='1' fill='%23ECEAF2'/%3E%3Crect x='24' y='19' width='3' height='5' rx='1' fill='%23ECEAF2'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <header class="bar">
+    <h1 class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Reactive Captions</h1>
+    <p class="file" id="fileName" hidden></p>
+    <div class="bar-actions">
+      <button class="btn ghost" id="newBtn" hidden>New video</button>
+      <div class="menu" id="exportMenu">
+        <button class="btn primary" id="exportBtn" aria-haspopup="true" aria-expanded="false" disabled>Export</button>
+        <div class="menu-list" role="menu" hidden>
+          <button role="menuitem" data-export="video">Video with captions<small>Burned in, plays in real time</small></button>
+          <button role="menuitem" data-export="ass">Styled subtitles (.ass)<small>Keeps sizes and colors. Opens in VLC, mpv, Aegisub, ffmpeg</small></button>
+          <button role="menuitem" data-export="srt">Plain subtitles (.srt)<small>YouTube, TikTok, Instagram upload</small></button>
+          <button role="menuitem" data-export="vtt">Web subtitles (.vtt)<small>Word timing, bold emphasis</small></button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="stage" id="stage">
+      <div class="drop" id="drop">
+        <div class="drop-inner">
+          <h2>Drop a video to caption it</h2>
+          <p>Speech is transcribed on this device, then captions grow, shake and change color with how each word is said.</p>
+          <label class="btn primary big">
+            Choose video
+            <input type="file" id="fileInput" accept="video/*,audio/*" hidden />
+          </label>
+          <details class="drop-options">
+            <summary>Transcription options</summary>
+            <div class="opt-grid">
+              <label>Language
+                <select id="language">
+                  <option value="auto">Detect automatically</option>
+                  <option value="english">English</option>
+                  <option value="swahili">Swahili</option>
+                  <option value="french">French</option>
+                  <option value="arabic">Arabic</option>
+                  <option value="spanish">Spanish</option>
+                  <option value="portuguese">Portuguese</option>
+                  <option value="hindi">Hindi</option>
+                  <option value="german">German</option>
+                </select>
+              </label>
+              <label>Accuracy
+                <select id="model">
+                  <option value="onnx-community/whisper-tiny_timestamped">Fast, small download</option>
+                  <option value="onnx-community/whisper-base_timestamped" selected>Balanced</option>
+                  <option value="onnx-community/whisper-small_timestamped">Best, larger download</option>
+                </select>
+              </label>
+              <label class="check"><input type="checkbox" id="detectSounds" /> Detect laughs, applause and other sounds <small>(extra one-time download)</small></label>
+              <label class="check srt">Already have subtitles?
+                <span class="btn ghost small">Use .srt / .vtt instead<input type="file" id="subsInput" accept=".srt,.vtt,text/vtt" hidden /></span>
+                <small id="subsName"></small>
+              </label>
+            </div>
+          </details>
+          <p class="privacy">Nothing is uploaded. The speech model downloads once and is cached by your browser.</p>
+        </div>
+      </div>
+
+      <div class="player" id="player" hidden>
+        <div class="screen" id="screen">
+          <div class="frame" id="frame">
+            <video id="video" playsinline preload="auto"></video>
+            <canvas id="overlay"></canvas>
+          </div>
+          <div class="work" id="work" hidden>
+            <p id="workText">Preparing…</p>
+            <div class="meter"><div id="workBar"></div></div>
+            <small id="workDetail"></small>
+          </div>
+        </div>
+        <div class="transport">
+          <button class="icon" id="playBtn" aria-label="Play">
+            <svg viewBox="0 0 24 24" class="i-play"><path d="M8 5v14l11-7z"/></svg>
+            <svg viewBox="0 0 24 24" class="i-pause"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
+          </button>
+          <span class="time" id="timeLabel">0:00 / 0:00</span>
+          <div class="strip-wrap" id="stripWrap" title="Each block is a word: height shows how strongly it was said, color shows the mood">
+            <canvas id="strip"></canvas>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="panel" id="panel">
+      <nav class="tabs" role="tablist">
+        <button role="tab" aria-selected="true" data-tab="style">Style</button>
+        <button role="tab" aria-selected="false" data-tab="react">Reactions</button>
+        <button role="tab" aria-selected="false" data-tab="words">Words</button>
+      </nav>
+
+      <div class="tab" data-pane="style">
+        <h3>Look</h3>
+        <div class="presets" id="presets"></div>
+        <h3>Position</h3>
+        <div class="seg" id="position">
+          <button data-v="top">Top</button><button data-v="middle">Middle</button><button data-v="bottom">Bottom</button>
+        </div>
+        <h3>Words on screen</h3>
+        <div class="seg" id="layout">
+          <button data-v="short">Few words</button><button data-v="long">Full lines</button>
+        </div>
+      </div>
+
+      <div class="tab" data-pane="react" hidden>
+        <p class="help">Choose what the captions respond to.</p>
+        <label class="toggle"><input type="checkbox" data-react="size" /><span><b>Size</b> Louder, stressed words grow. Shouts go all caps.</span></label>
+        <label class="toggle"><input type="checkbox" data-react="color" /><span><b>Color</b> Emphasized words take the mood's color.</span></label>
+        <label class="toggle"><input type="checkbox" data-react="motion" /><span><b>Motion</b> Shouts shake, excited lines bounce.</span></label>
+        <label class="toggle"><input type="checkbox" data-react="sounds" /><span><b>Sound tags</b> Show [laughs], [applause] and similar.</span></label>
+        <h3>Sensitivity</h3>
+        <div class="range">
+          <span>Calm</span><input type="range" id="sensitivity" min="0.5" max="1.6" step="0.05" /><span>Wild</span>
+        </div>
+        <p class="help" id="reactStats"></p>
+        <h3>Moods</h3>
+        <ul class="legend" id="legend"></ul>
+        <button class="btn ghost small" id="tagSoundsBtn" hidden>Detect sounds now</button>
+      </div>
+
+      <div class="tab" data-pane="words" hidden>
+        <div class="inspector" id="inspector" hidden>
+          <input type="text" id="wordText" aria-label="Word text" />
+          <div class="seg levels" id="wordLevel">
+            <button data-v="0">Normal</button><button data-v="1">Stressed</button><button data-v="2">Strong</button><button data-v="3">Shout</button>
+          </div>
+          <div class="inspector-row">
+            <button class="btn ghost small" id="wordAuto">Back to automatic</button>
+            <button class="btn ghost small danger" id="wordDelete">Delete word</button>
+          </div>
+        </div>
+        <p class="help" id="wordsHelp">Click a word to jump there and change it.</p>
+        <ol class="pages" id="pages"></ol>
+      </div>
+    </aside>
+  </main>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

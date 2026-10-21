@@ -4,6 +4,7 @@
 
 import { CWI, toCWIDocument } from './cwi.js';
 import { POSITIONS, TEXT_SIZES } from './renderer.js';
+import { getFont, fontWeight } from './fonts.js';
 
 export function formatTime(sec, sep = '.') {
   const ms = Math.max(0, Math.round(sec * 1000));
@@ -59,7 +60,8 @@ const assEsc = (s) => s.replace(/\\/g, '＼').replace(/\{/g, '(').replace(/\}/g,
  * weight (\\b) and size (\\fs), white -> speaker color over 600 ms (\\t), and
  * the 15% emphasis bounce. Burn in with: ffmpeg -i in.mp4 -vf subtitles=captions.ass out.mp4
  */
-export function toASS(project, { width = 1080, height = 1920, position = 'bottom', textSize = 'medium', backing = 'outline', names = false } = {}) {
+export function toASS(project, { width = 1080, height = 1920, position = 'bottom', textSize = 'medium', backing = 'outline', names = false, font: fontId } = {}) {
+  const font = getFont(fontId);
   const base = Math.min(width, height) * (TEXT_SIZES[textSize] || TEXT_SIZES.medium);
   const y = Math.round(height * (POSITIONS[position] ?? POSITIONS.bottom));
   const box = backing === 'box';
@@ -76,7 +78,7 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: CWI,Roboto Flex,${Math.round(base)},&H00FFFFFF,&H00FFFFFF,${box ? '&H241A1A1A' : '&H1A000000'},${box ? '&H241A1A1A' : '&H80000000'},0,0,0,0,100,100,0,0,${box ? 3 : 1},${box ? Math.round(base * 0.2) : Math.max(1, Math.round(base * 0.07))},${box ? 0 : Math.round(base * 0.04)},5,${Math.round(width * 0.07)},${Math.round(width * 0.07)},40,1
+Style: CWI,${font.family},${Math.round(base)},&H00FFFFFF,&H00FFFFFF,${box ? '&H241A1A1A' : '&H1A000000'},${box ? '&H241A1A1A' : '&H80000000'},0,0,0,0,100,100,0,0,${box ? 3 : 1},${box ? Math.round(base * 0.2) : Math.max(1, Math.round(base * 0.07))},${box ? 0 : Math.round(base * 0.04)},5,${Math.round(width * 0.07)},${Math.round(width * 0.07)},40,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -85,7 +87,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     const color = bgr(c.who?.color || '#FFFFFF');
     const parts = c.words.map((w) => {
       const t0 = Math.max(0, Math.round((w.start - c.start) * 1000));
-      let tags = `\\b${w.weight}\\fs${Math.round(base * w.size)}\\1c&HFFFFFF&\\t(${t0},${t0 + anim},\\1c&H${color}&)`;
+      let tags = `\\b${fontWeight(font, w.weight)}\\fs${Math.round(base * w.size)}\\1c&HFFFFFF&\\t(${t0},${t0 + anim},\\1c&H${color}&)`;
       if (w.emphasis) tags += `\\t(${t0},${t0 + half},\\fscx${bounce}\\fscy${bounce})\\t(${t0 + half},${t0 + anim},\\fscx100\\fscy100)`;
       return `{${tags}}${assEsc(w.text)}`;
     });

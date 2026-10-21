@@ -6,7 +6,10 @@
 // bounce 15% upward over the same 600 ms.
 
 import { CWI } from './cwi.js';
+import { getFont, familyStack, fontWeight, fauxBold, DEFAULT_FONT } from './fonts.js';
+import { draw3D, MOTIONS } from './gl3d.js';
 
+export { MOTIONS };
 export const FONT = '"Roboto Flex", "Roboto", system-ui, sans-serif';
 export const POSITIONS = { top: 0.18, middle: 0.62, bottom: 0.84 };
 export const TEXT_SIZES = { small: 0.05, medium: 0.062, large: 0.076 };
@@ -17,6 +20,8 @@ export const DEFAULT_SETTINGS = {
   backing: 'outline', // 'outline' | 'box'
   names: false,
   sensitivity: 1,
+  font: DEFAULT_FONT,
+  motion: 'flat', // see MOTIONS in gl3d.js
 };
 
 const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
@@ -56,16 +61,23 @@ export function captionAt(captions, t) {
   return null;
 }
 
-const fontFor = (w, px) => `${w.weight} ${Math.round(px)}px ${FONT}`;
+/** Canvas font string for a word in the chosen typeface. */
+export function fontFor(w, px, font) {
+  return `${fontWeight(font, w.weight)} ${Math.round(px)}px ${familyStack(font)}`;
+}
+export const strokeFor = (w, px) => px * (0.07 + 0.08 * (w.weight / 900));
 
 export function layoutCaption(ctx, cap, byId, W, H, settings) {
   const base = (settings.sizeRef ?? Math.min(W, H)) * (TEXT_SIZES[settings.textSize] || TEXT_SIZES.medium);
   const maxW = W * 0.86;
+  const font = getFont(settings.font);
+  // 3D words lift toward the camera and look bigger, so give them more room.
+  const is3D = settings.motion && settings.motion !== 'flat';
   const items = cap.wordIds.map((id) => byId.get(id)).filter(Boolean).map((w) => {
     const px = base * w.size;
-    ctx.font = fontFor(w, px);
+    ctx.font = fontFor(w, px, font);
     // Bigger words get more room so the emphasis bounce never touches a neighbour.
-    return { w, px, width: ctx.measureText(w.text).width, space: Math.max(base, px) * 0.3 + (w.emphasis ? px * 0.08 : 0) };
+    return { w, px, width: ctx.measureText(w.text).width, space: Math.max(base, px) * (is3D ? 0.42 : 0.3) + (w.emphasis ? px * (is3D ? 0.16 : 0.08) : 0) };
   });
   const lines = [];
   let line = { items: [], width: 0, h: 0 };
@@ -88,7 +100,7 @@ export function layoutCaption(ctx, cap, byId, W, H, settings) {
     let x = W / 2 - l.width / 2;
     for (const it of l.items) { it.x = x; it.y = l.baseline; x += it.width + it.space; }
   }
-  return { lines, top, bottom: y, base };
+  return { lines, top, bottom: y, base, font };
 }
 
 function roundRect(ctx, x, y, w, h, r) {
@@ -113,6 +125,11 @@ export function drawCaptions(ctx, project, t, settings) {
   const enter = clamp((t - cap.start) / 0.12);
   const anim = CWI.ANIMATION_MS / 1000;
 
+  if (settings.motion && settings.motion !== 'flat' && draw3D(ctx, L, cap, color, t, settings, enter)) {
+    if (settings.names && speaker) drawName(ctx, L, speaker.name, color, enter, W);
+    return cap;
+  }
+
   ctx.save();
   ctx.globalAlpha = enter;
   if (settings.backing === 'box') {
@@ -123,19 +140,7 @@ export function drawCaptions(ctx, project, t, settings) {
       ctx.fill();
     }
   }
-  if (settings.names && speaker) {
-    const px = L.base * 0.5;
-    ctx.font = `600 ${Math.round(px)}px ${FONT}`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'alphabetic';
-    const y = L.top - px * 0.45;
-    ctx.lineWidth = px * 0.25;
-    ctx.lineJoin = 'round';
-    ctx.strokeStyle = 'rgba(0,0,0,0.85)';
-    ctx.strokeText(speaker.name, W / 2, y);
-    ctx.fillStyle = color;
-    ctx.fillText(speaker.name, W / 2, y);
-  }
+  if (settings.names && speaker) drawName(ctx, L, speaker.name, color, 1, W);
 
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
@@ -150,10 +155,11 @@ export function drawCaptions(ctx, project, t, settings) {
       // Scale from the word's bottom center so the bounce rises upward.
       ctx.translate(it.x + it.width / 2, it.y);
       ctx.scale(scale, scale);
-      ctx.font = fontFor(w, it.px);
+      ctx.font = fontFor(w, it.px, L.font);
+      const faux = fauxBold(L.font, w.weight, it.px);
       if (settings.backing !== 'box') {
         // Thinner strokes on thin type so light weights stay legible, not hollow.
-        ctx.lineWidth = it.px * (0.07 + 0.08 * (w.weight / 900));
+        ctx.lineWidth = strokeFor(w, it.px) + faux;
         ctx.strokeStyle = 'rgba(0,0,0,0.9)';
         ctx.shadowColor = 'rgba(0,0,0,0.5)';
         ctx.shadowBlur = it.px * 0.15;
@@ -162,6 +168,7 @@ export function drawCaptions(ctx, project, t, settings) {
         ctx.shadowColor = 'transparent';
       }
       ctx.fillStyle = k > 0 ? mix('#FFFFFF', color, k) : '#FFFFFF';
+      if (faux) { ctx.lineWidth = faux; ctx.strokeStyle = ctx.fillStyle; ctx.strokeText(w.text, -it.width / 2, 0); }
       ctx.fillText(w.text, -it.width / 2, 0);
       ctx.restore();
     }
@@ -169,3 +176,22 @@ export function drawCaptions(ctx, project, t, settings) {
   ctx.restore();
   return cap;
 }
+
+function drawName(ctx, L, name, color, alpha, W) {
+  const px = L.base * 0.5;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.font = `600 ${Math.round(px)}px ${familyStack(L.font)}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  const y = L.top - px * 0.45;
+  ctx.lineWidth = px * 0.25;
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+  ctx.strokeText(name, W / 2, y);
+  ctx.fillStyle = color;
+  ctx.fillText(name, W / 2, y);
+  ctx.restore();
+}
+
+export { mix, ease as cssEase };

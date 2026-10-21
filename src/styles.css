@@ -182,6 +182,30 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
 .key .k-small { font-size: 0.8em; }
 .toggle.compact { border-bottom: 0; padding: 4px 0; }
 
+/* ---------- fonts and motion pickers */
+.fonts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; max-height: 268px; overflow-y: auto; padding: 2px; }
+.font-card, .motion-card {
+  display: grid; gap: 2px; text-align: left; padding: 8px 10px; cursor: pointer;
+  background: var(--raise); border: 1px solid var(--line); border-radius: var(--r-md); color: var(--text);
+}
+.font-card:hover, .motion-card:hover { border-color: var(--muted); }
+.font-card[aria-checked='true'], .motion-card[aria-checked='true'] { border-color: var(--signal); box-shadow: 0 0 0 1px var(--signal); }
+.font-card .sample { font-size: 26px; line-height: 1.1; white-space: nowrap; overflow: hidden; }
+.font-card .sample .lo { opacity: 0.85; }
+.font-card .sample .hi { color: #6b8aff; }
+.font-card b { font-size: 13px; font-weight: 600; }
+.font-card small, .motion-card small { color: var(--muted); font-size: 11.5px; line-height: 1.25; }
+.motions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.motion-card b { font-size: 13.5px; }
+.motion-card .glyph { height: 30px; display: grid; place-items: center; perspective: 120px; }
+.motion-card .glyph span { font: 800 22px var(--cwi); color: #fff; text-shadow: 0 1px 0 #6b8aff, 0 2px 0 #4a63c0, 0 3px 0 #33468c, 0 5px 6px rgba(0,0,0,.5); }
+.motion-card[data-v='flat'] .glyph span { text-shadow: none; color: #6b8aff; }
+.motion-card[data-v='extrude'] .glyph span { transform: rotateX(14deg) rotateY(-12deg); }
+.motion-card[data-v='flip'] .glyph span { transform: rotateX(48deg); }
+.motion-card[data-v='swing'] .glyph span { transform: rotateY(-48deg); transform-origin: left center; }
+.motion-card[data-v='drop'] .glyph span { transform: translateY(-6px) rotateX(-20deg); }
+.motion-card[data-v='stage'] .glyph span { transform: rotateX(38deg); }
+
 /* ---------- words tab */
 .caps { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
 .cap { display: grid; grid-template-columns: 40px 1fr; gap: 6px; padding: 6px 8px; border-radius: var(--r-sm); border-left: 3px solid var(--who, var(--line)); }
@@ -255,6 +279,7 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
 
 /* ---------- small screens */
 @media (max-width: 860px) {
+  .fonts { max-height: none; }
   .layout { grid-template-columns: 1fr; height: auto; }
   .stage { min-height: 0; }
   .screen { height: 58vh; flex: none; }

@@ -174,3 +174,19 @@ test('exports carry speakers and CWI styling', async () => {
   assert.equal(doc.cast[0].name, 'Amina');
   assert.equal(formatTime(3661.5, ','), '01:01:01,500');
 });
+
+test('fonts map CWI weights into each typeface and keep regular at regular', async () => {
+  const { getFont, fontWeight, fauxBold, cssUrl, FONTS } = await import('../src/fonts.js');
+  const rf = getFont('roboto-flex');
+  assert.deepEqual([100, 400, 900].map((w) => fontWeight(rf, w)), [100, 400, 1000]);
+  const oswald = getFont('oswald');
+  assert.deepEqual([100, 400, 900].map((w) => fontWeight(oswald, w)), [200, 400, 700]);
+  const bebas = getFont('bebas');
+  assert.equal(fontWeight(bebas, 900), 400);
+  assert.ok(fauxBold(bebas, 900, 100) > 0 && fauxBold(rf, 900, 100) === 0);
+  assert.match(cssUrl([rf]), /family=Roboto\+Flex:opsz,wght@8\.\.144,100\.\.1000/);
+  assert.equal(new Set(FONTS.map((f) => f.id)).size, FONTS.length);
+  const { toASS } = await import('../src/export.js');
+  const { p } = project();
+  assert.match(toASS(p, { font: 'oswald' }), /Style: CWI,Oswald,[\s\S]*\\b700/);
+});

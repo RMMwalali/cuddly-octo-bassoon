@@ -18,6 +18,15 @@ Everything runs on the creator's device. The video is never uploaded.
 - **Speakers tab:** rename speakers, pick colors from a palette that passes WCAG contrast, or merge speakers that were split by mistake.
 - **Words tab:** every caption with its speaker. Click a word to change its text, weight (thin ↔ bold), size (quiet ↔ loud) or emphasis, or to move a caption to another speaker.
 - **Check tab:** scores the captions against the 12 CWI rules from [OpenCaptions](https://github.com/broomva/opencaptions) and links each problem to the caption it's in.
+- **16 fonts.** 12 are variable fonts that carry the full CWI weight range: Roboto Flex (the official CWI typeface), Inter, Montserrat, Outfit, Unbounded, Archivo, Oswald, Sora, Bricolage Grotesque, Recursive, Fraunces and Playfair Display. Four are single-weight display fonts: Bebas Neue, Anton, Luckiest Guy and Permanent Marker. In those, lower-pitched words are drawn thicker. Each CWI weight is mapped into the font's own range, and regular stays regular. Fonts load only when picked.
+- **3D motion styles**, rendered with WebGL and kept faithful to CWI. Words still turn from white to the speaker's color as they're spoken, size still follows volume, weight follows pitch, and emphasized words still bounce, now also pushing toward the camera.
+  - **Extrude:** solid, lit 3D letters with depth and shadow.
+  - **Flip:** unspoken words lean back, then flip up to face you as they're said.
+  - **Swing:** words swing open like doors.
+  - **Drop:** words hover faintly, then fall into place.
+  - **Stage:** the caption lies on a tilted stage, and each word stands up as it's spoken.
+  - **Flat:** classic CWI.
+  3D shows in the preview and in the exported video. Subtitle files keep the flat CWI animation.
 - **Style:** position, a few words at a time (short-form) or full lines (long-form), text size, outline or dark box, optional speaker names, and an intonation-strength slider.
 - **Intention strip** under the video: one block per word, where color is the speaker, height is loudness, opacity is weight and a dot marks emphasis. Click a block to edit that word.
 - **Bring your own captions:** import a `.srt` or `.vtt` (speaker names are read from `<v Name>` tags or `NAME:` prefixes) to skip transcription, or a `.cwi.json` from OpenCaptions or from this tool.
@@ -53,7 +62,9 @@ video
           speaker attribution, voice profile per speaker,
           pitch → weight, volume → size, emphasis, caption grouping
           ├ 12-rule CWI check                    src/validate.js
+          ├ fonts and weight mapping             src/fonts.js
           ├ canvas renderer, preview and export  src/renderer.js
+          ├ WebGL 3D layer                       src/gl3d.js
           └ .cwi.json / .ass / .vtt / .srt       src/export.js
 ```
 
@@ -88,6 +99,7 @@ This is a prototype.
 
 - **Speaker detection** uses the pyannote segmentation model alone, without voice embeddings. It handles up to 3 speakers and works best on short clips. On long videos it can mix up who is who. The Speakers and Words tabs exist to fix that quickly.
 - **Pitch tracking** is a simple autocorrelation tracker. Music, overlapping speech and heavy noise make weights less reliable.
+- **3D styles** need WebGL2, which every current desktop and phone browser has. Without it, captions fall back to flat CWI.
 - **Video export** plays in real time and needs the tab to stay visible. Chrome produces MP4. Other browsers may produce WebM or VP9, which some phone apps reject. In that case, export `.ass` and burn it in with ffmpeg.
 - The CWI visual guidelines come from captionwithintention.org. The full design-system PDF is available on request from the Chicago Hearing Society.
 

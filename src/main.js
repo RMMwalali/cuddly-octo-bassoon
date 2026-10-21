@@ -2,7 +2,8 @@ import { decodeToMono16k, wordFeatures, envelope } from './audio.js';
 import {
   wordsFromWhisper, parseCues, wordsFromCues, assignSpeakers, analyze, fromCWIDocument, SPEAKER_COLORS, CWI,
 } from './cwi.js';
-import { drawCaptions, DEFAULT_SETTINGS, FONT } from './renderer.js';
+import { drawCaptions, DEFAULT_SETTINGS, MOTIONS } from './renderer.js';
+import { FONTS, getFont, ensureFont, cssUrl, familyStack } from './fonts.js';
 import { validate, contrastRatio, RULE_LIST } from './validate.js';
 import { toSRT, toVTT, toASS, toCWIJSON, download, burnIn } from './export.js';
 import { toCWIDocument } from './cwi.js';
@@ -519,8 +520,44 @@ function renderStats() {
 function setSeg(sel, value) {
   $$(`${sel} button`).forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.v === value)));
 }
+function buildPickers() {
+  // Tiny subsets of every font, just enough to draw the "Aa" samples.
+  const link = document.createElement('link');
+  link.rel = 'stylesheet';
+  link.href = cssUrl(FONTS, 'Aa');
+  document.head.append(link);
+  $('#fonts').innerHTML = FONTS.map((f) => `
+    <button class="font-card" role="radio" data-v="${f.id}" aria-checked="false">
+      <span class="sample" style="font-family:${familyStack(f).replace(/"/g, "'")}">${f.fixed
+        ? `<span class="hi" style="font-weight:${f.min}">Aa</span>`
+        : `<span class="lo" style="font-weight:${f.min}">Aa</span><span class="hi" style="font-weight:${f.max}">Aa</span>`}</span>
+      <b>${f.name}</b>
+      <small>${f.hint}${f.fixed ? '. One weight, so pitch shows as thickness' : f.min >= 400 ? '. Can’t go thinner than regular' : ''}</small>
+    </button>`).join('');
+  $('#motions').innerHTML = Object.entries(MOTIONS).map(([id, m]) => `
+    <button class="motion-card" role="radio" data-v="${id}" aria-checked="false">
+      <span class="glyph" aria-hidden="true"><span>Aa</span></span>
+      <b>${m.label}</b><small>${m.hint}</small>
+    </button>`).join('');
+}
+$('#fonts').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-v]'); if (!b) return;
+  state.settings.font = b.dataset.v;
+  saveSettings(); syncSettings();
+  ensureFont(getFont(b.dataset.v)).then(draw);
+  draw();
+});
+$('#motions').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-v]'); if (!b) return;
+  state.settings.motion = b.dataset.v;
+  saveSettings(); syncSettings(); draw();
+});
+
 function syncSettings() {
   const s = state.settings;
+  $$('#fonts [data-v]').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.v === s.font)));
+  $$('#motions [data-v]').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.v === s.motion)));
+  $('#motionNote').hidden = !s.motion || s.motion === 'flat';
   for (const k of ['position', 'layout', 'textSize', 'backing']) setSeg(`#${k}`, s[k]);
   $('#names').checked = !!s.names;
   $('#sensitivity').value = s.sensitivity;
@@ -684,8 +721,9 @@ async function exportVideo() {
 
 // ------------------------------------------------------------------ boot
 function loadFonts() {
-  return Promise.all([100, 400, 900].map((w) => document.fonts?.load(`${w} 40px ${FONT}`))).catch(() => {});
+  return ensureFont(getFont(state.settings.font));
 }
+buildPickers();
 syncSettings();
 loadFonts().then(draw);
 document.fonts?.ready.then(draw);

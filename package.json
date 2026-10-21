@@ -1,8 +1,8 @@
 {
   "name": "reactive-captions",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Automatic captions that react to how things are said — runs entirely in the browser.",
+  "description": "Automatic Caption with Intention (CWI) captions: speaker colors, word sync, and type that follows pitch and volume. Runs in the browser.",
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.js",

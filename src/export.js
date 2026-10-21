@@ -1,65 +1,53 @@
-// Exports: SRT and WebVTT for platforms, ASS for editors and ffmpeg (keeps the
-// reactive styling), and a burned-in video rendered in the browser.
+// Exports: .cwi.json (OpenCaptions format), styled .ass that plays the CWI
+// animation in VLC/mpv/ffmpeg, .vtt with speaker voice tags, plain .srt, and a
+// burned-in video rendered in the browser.
 
-import { PRESETS, POSITIONS, emphasisColor } from './presets.js';
+import { CWI, toCWIDocument } from './cwi.js';
+import { POSITIONS, TEXT_SIZES } from './renderer.js';
 
 export function formatTime(sec, sep = '.') {
   const ms = Math.max(0, Math.round(sec * 1000));
-  const h = Math.floor(ms / 3600000);
-  const m = Math.floor((ms % 3600000) / 60000);
-  const s = Math.floor((ms % 60000) / 1000);
   const pad = (n, l = 2) => String(n).padStart(l, '0');
-  return `${pad(h)}:${pad(m)}:${pad(s)}${sep}${pad(ms % 1000, 3)}`;
+  return `${pad(Math.floor(ms / 3600000))}:${pad(Math.floor((ms % 3600000) / 60000))}:${pad(Math.floor((ms % 60000) / 1000))}${sep}${pad(ms % 1000, 3)}`;
 }
 
-const byIdOf = (project) => new Map(project.words.map((w) => [w.id, w]));
-const shown = (w) => (w.level === 3 ? w.text.toUpperCase() : w.text);
-
-function cues(project) {
-  const byId = byIdOf(project);
-  const list = project.pages.map((p) => ({ start: p.start, end: p.end, words: p.wordIds.map((id) => byId.get(id)).filter(Boolean) }));
-  for (const s of project.sounds || []) list.push({ start: s.start, end: s.end, sound: s.text });
-  return list.sort((a, b) => a.start - b.start || (a.sound ? -1 : 1));
+function rows(project) {
+  const byId = new Map(project.words.map((w) => [w.id, w]));
+  const cast = new Map(project.cast.map((s) => [s.id, s]));
+  return project.captions.map((c) => ({ ...c, words: c.wordIds.map((id) => byId.get(id)).filter(Boolean), who: cast.get(c.speaker) }));
 }
 
+/** Plain subtitles. With several speakers, a new speaker's first line is prefixed "Name:". */
 export function toSRT(project) {
-  return cues(project)
-    .map((c, i) => `${i + 1}\n${formatTime(c.start, ',')} --> ${formatTime(c.end, ',')}\n${c.sound ? `[${c.sound}]` : c.words.map(shown).join(' ')}\n`)
-    .join('\n');
+  const multi = project.cast.length > 1;
+  let last = null;
+  return rows(project).map((c, i) => {
+    const prefix = multi && c.speaker !== last && c.who ? `${c.who.name}: ` : '';
+    last = c.speaker;
+    return `${i + 1}\n${formatTime(c.start, ',')} --> ${formatTime(c.end, ',')}\n${prefix}${c.words.map((w) => w.text).join(' ')}\n`;
+  }).join('\n');
 }
 
+/** WebVTT with <v Speaker> tags, per-word timing and bold emphasis. */
 export function toVTT(project) {
   const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const body = cues(project).map((c) => {
-    let text;
-    if (c.sound) text = `[${esc(c.sound)}]`;
-    else {
-      text = c.words
-        .map((w, i) => {
-          const t = esc(shown(w));
-          const word = w.level >= 2 ? `<b>${t}</b>` : t;
-          return i === 0 ? word : `<${formatTime(w.start)}>${word}`;
-        })
-        .join(' ');
-    }
-    return `${formatTime(c.start)} --> ${formatTime(c.end)}\n${text}\n`;
+  const cues = rows(project).map((c) => {
+    const text = c.words.map((w, i) => {
+      const t = w.emphasis ? `<b>${esc(w.text)}</b>` : esc(w.text);
+      return i === 0 ? t : `<${formatTime(w.start)}>${t}`;
+    }).join(' ');
+    const v = c.who ? `<v ${esc(c.who.name)}>` : '';
+    return `${formatTime(c.start)} --> ${formatTime(c.end)}\n${v}${text}\n`;
   });
-  return `WEBVTT\n\n${body.join('\n')}`;
+  return `WEBVTT\n\n${cues.join('\n')}`;
 }
 
-// ASS colors are &HAABBGGRR (alpha 00 = opaque).
-function assColor(css, alpha = 0) {
-  const m = /^#?([0-9a-f]{6})$/i.exec(css || '');
-  let hex = m ? m[1] : 'FFFFFF';
-  let a = alpha;
-  const rgba = /rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/.exec(css || '');
-  if (rgba) {
-    hex = [rgba[1], rgba[2], rgba[3]].map((n) => Number(n).toString(16).padStart(2, '0')).join('');
-    if (rgba[4] !== undefined) a = Math.round((1 - Number(rgba[4])) * 255);
-  }
-  const [r, g, b] = [hex.slice(0, 2), hex.slice(2, 4), hex.slice(4, 6)];
-  return `&H${a.toString(16).padStart(2, '0').toUpperCase()}${b}${g}${r}`.toUpperCase();
+export function toCWIJSON(project, meta) {
+  return JSON.stringify(toCWIDocument(project, meta), null, 2) + '\n';
 }
+
+// ASS colors are &HBBGGRR (alpha separate).
+const bgr = (hex) => { const h = hex.replace('#', ''); return `${h.slice(4, 6)}${h.slice(2, 4)}${h.slice(0, 2)}`.toUpperCase(); };
 const assTime = (s) => {
   const cs = Math.max(0, Math.round(s * 100));
   return `${Math.floor(cs / 360000)}:${String(Math.floor(cs / 6000) % 60).padStart(2, '0')}:${String(Math.floor(cs / 100) % 60).padStart(2, '0')}.${String(cs % 100).padStart(2, '0')}`;
@@ -67,19 +55,19 @@ const assTime = (s) => {
 const assEsc = (s) => s.replace(/\\/g, '＼').replace(/\{/g, '(').replace(/\}/g, ')');
 
 /**
- * Advanced SubStation Alpha. One event per spoken word, so the active-word
- * highlight, emphasis sizes and mood colors play back in VLC, mpv, Aegisub,
- * and ffmpeg (`-vf subtitles=captions.ass`).
+ * Advanced SubStation Alpha that plays the CWI animation: per-word Roboto Flex
+ * weight (\\b) and size (\\fs), white -> speaker color over 600 ms (\\t), and
+ * the 15% emphasis bounce. Burn in with: ffmpeg -i in.mp4 -vf subtitles=captions.ass out.mp4
  */
-export function toASS(project, { width = 1080, height = 1920, preset: presetKey = 'pop', position = 'middle', react = { size: true, color: true } } = {}) {
-  const preset = PRESETS[presetKey] || PRESETS.pop;
-  const base = Math.round(Math.min(width, height) * preset.size);
-  const outline = Math.max(0, Math.round(base * preset.strokeW * 0.5));
-  const y = Math.round(height * (POSITIONS[position] ?? POSITIONS.middle));
-  const borderStyle = preset.box ? 3 : 1;
-  const fill = preset.reveal === 'sweep' ? 'rgba(255,255,255,0.55)' : preset.fill;
+export function toASS(project, { width = 1080, height = 1920, position = 'bottom', textSize = 'medium', backing = 'outline', names = false } = {}) {
+  const base = Math.min(width, height) * (TEXT_SIZES[textSize] || TEXT_SIZES.medium);
+  const y = Math.round(height * (POSITIONS[position] ?? POSITIONS.bottom));
+  const box = backing === 'box';
+  const anim = CWI.ANIMATION_MS;
+  const half = Math.round(anim / 2);
+  const bounce = Math.round(100 * (1 + CWI.BOUNCE));
   const head = `[Script Info]
-; Made with Reactive Captions
+; Caption with Intention styling, made with Reactive Captions
 ScriptType: v4.00+
 PlayResX: ${width}
 PlayResY: ${height}
@@ -88,41 +76,22 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Caption,${preset.family},${base},${assColor(fill)},${assColor(preset.accent)},${assColor(preset.box ? '#000000' : preset.stroke)},${assColor('#000000', preset.box ? 0x60 : 0x80)},${preset.weight >= 700 ? -1 : 0},0,0,0,100,100,0,0,${borderStyle},${preset.box ? Math.round(base * 0.25) : outline},${preset.shadow ? Math.round(base * 0.05) : 0},5,40,40,40,1
-Style: Sound,${preset.family},${Math.round(Math.min(width, height) * 0.032)},${assColor('#FFD23F')},${assColor('#FFD23F')},${assColor('#000000')},${assColor('#000000', 0x50)},-1,0,0,0,100,100,0,0,3,${Math.round(base * 0.12)},0,5,40,40,40,1
+Style: CWI,Roboto Flex,${Math.round(base)},&H00FFFFFF,&H00FFFFFF,${box ? '&H241A1A1A' : '&H1A000000'},${box ? '&H241A1A1A' : '&H80000000'},0,0,0,0,100,100,0,0,${box ? 3 : 1},${box ? Math.round(base * 0.2) : Math.max(1, Math.round(base * 0.07))},${box ? 0 : Math.round(base * 0.04)},5,${Math.round(width * 0.07)},${Math.round(width * 0.07)},40,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
-  const byId = byIdOf(project);
-  const lines = [];
-  for (const p of project.pages) {
-    const ws = p.wordIds.map((id) => byId.get(id)).filter(Boolean);
-    const emph = emphasisColor(preset, p.mood, react.color);
-    ws.forEach((active, i) => {
-      const start = i === 0 ? p.start : active.start;
-      const end = i < ws.length - 1 ? ws[i + 1].start : p.end;
-      if (end <= start) return;
-      const parts = [];
-      ws.forEach((w, j) => {
-        if (preset.reveal === 'word' && j > i) return;
-        const txt = assEsc(preset.upper ? w.text.toUpperCase() : shown(w));
-        const scale = react.size ? Math.round((preset.scales[w.level] || 1) * 100) : 100;
-        let color = null;
-        if (preset.reveal === 'sweep') color = j <= i ? (w.level >= 2 && react.color ? emph : preset.accent) : null;
-        else if (j === i && preset.reveal !== 'word') color = w.level >= 2 && react.color ? emph : preset.accent;
-        else if (w.level >= 2 && react.color) color = emph;
-        const tags = [];
-        if (scale !== 100) tags.push(`\\fscx${scale}\\fscy${scale}`);
-        if (color) tags.push(`\\1c&H${assColor(color).slice(4)}&\\1a&H00&`);
-        parts.push(tags.length ? `{${tags.join('')}}${txt}{\\r}` : txt);
-      });
-      lines.push(`Dialogue: 0,${assTime(start)},${assTime(end)},Caption,,0,0,0,,{\\an5\\pos(${width / 2},${y})}${parts.join(' ')}`);
+  const lines = rows(project).map((c) => {
+    const color = bgr(c.who?.color || '#FFFFFF');
+    const parts = c.words.map((w) => {
+      const t0 = Math.max(0, Math.round((w.start - c.start) * 1000));
+      let tags = `\\b${w.weight}\\fs${Math.round(base * w.size)}\\1c&HFFFFFF&\\t(${t0},${t0 + anim},\\1c&H${color}&)`;
+      if (w.emphasis) tags += `\\t(${t0},${t0 + half},\\fscx${bounce}\\fscy${bounce})\\t(${t0 + half},${t0 + anim},\\fscx100\\fscy100)`;
+      return `{${tags}}${assEsc(w.text)}`;
     });
-  }
-  for (const s of project.sounds || []) {
-    lines.push(`Dialogue: 1,${assTime(s.start)},${assTime(s.end)},Sound,,0,0,0,,{\\an5\\pos(${width / 2},${Math.round(Math.max(60, y - base * 1.8))})}[${assEsc(s.text)}]`);
-  }
+    const label = names && c.who ? `{\\b600\\fs${Math.round(base * 0.5)}\\1c&H${color}&}${assEsc(c.who.name)}\\N` : '';
+    return `Dialogue: 0,${assTime(c.start)},${assTime(c.end)},CWI,${assEsc(c.who?.name || '')},0,0,0,,{\\an5\\pos(${Math.round(width / 2)},${y})}${label}${parts.join(' ')}`;
+  });
   return head + lines.join('\n') + '\n';
 }
 

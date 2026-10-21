@@ -1,8 +1,11 @@
 import { decodeToMono16k, wordFeatures, envelope } from './audio.js';
-import { wordsFromWhisper, parseCues, wordsFromCues, react, soundsFromTags, scoreEmphasis, MOODS } from './reactive.js';
-import { drawCaptions, pageAt } from './renderer.js';
-import { PRESETS, DEFAULT_SETTINGS, MOOD_COLORS, MOOD_LABELS } from './presets.js';
-import { toSRT, toVTT, toASS, download, burnIn } from './export.js';
+import {
+  wordsFromWhisper, parseCues, wordsFromCues, assignSpeakers, analyze, fromCWIDocument, SPEAKER_COLORS, CWI,
+} from './cwi.js';
+import { drawCaptions, DEFAULT_SETTINGS, FONT } from './renderer.js';
+import { validate, contrastRatio, RULE_LIST } from './validate.js';
+import { toSRT, toVTT, toASS, toCWIJSON, download, burnIn } from './export.js';
+import { toCWIDocument } from './cwi.js';
 import { Strip } from './strip.js';
 
 const $ = (s) => document.querySelector(s);
@@ -13,22 +16,24 @@ const state = {
   file: null,
   url: null,
   audio: null, // { samples, sampleRate, duration }
-  project: null, // { words, pages, sounds }
+  project: null, // { words, cast, captions }
   settings: loadSettings(),
   selected: null,
-  subs: null, // imported subtitle text
+  subs: null, // { kind: 'cues' | 'cwi', text, name }
+  language: null,
+  source: 'browser-whisper+pyannote', // what produced the words, for the CWI metadata
   busy: false,
 };
 
 function loadSettings() {
   try {
-    const s = JSON.parse(localStorage.getItem('rc-settings') || 'null');
-    if (s) return { ...DEFAULT_SETTINGS, ...s, react: { ...DEFAULT_SETTINGS.react, ...s.react } };
+    const s = JSON.parse(localStorage.getItem('rc-cwi-settings') || 'null');
+    if (s) return { ...DEFAULT_SETTINGS, ...s };
   } catch {}
-  return structuredClone(DEFAULT_SETTINGS);
+  return { ...DEFAULT_SETTINGS };
 }
 function saveSettings() {
-  try { localStorage.setItem('rc-settings', JSON.stringify(state.settings)); } catch {}
+  try { localStorage.setItem('rc-cwi-settings', JSON.stringify(state.settings)); } catch {}
 }
 
 // ------------------------------------------------------------------ worker
@@ -48,8 +53,9 @@ function getWorker() {
     onWorkerEvent(data);
   };
   worker.onerror = (e) => {
-    for (const { reject } of pending.values()) reject(new Error(e.message || 'The speech model could not start in this browser.'));
+    for (const { reject } of pending.values()) reject(new Error(e.message || 'The models could not start in this browser.'));
     pending.clear();
+    worker = null;
   };
   return worker;
 }
@@ -65,20 +71,18 @@ const downloads = new Map();
 function onWorkerEvent(d) {
   if (d.type === 'status') work(d.text);
   else if (d.type === 'download') {
-    downloads.set(d.file, { loaded: d.loaded, total: d.total, done: d.status === 'done' });
+    downloads.set(d.file, { loaded: d.loaded, total: d.total });
     let loaded = 0, total = 0;
     for (const f of downloads.values()) { loaded += f.loaded; total += f.total; }
-    if (total > 0) work(null, loaded / total, `Downloading ${d.kind} model, ${mb(loaded)} of ${mb(total)}. This happens once.`);
+    if (total > 0) work(null, loaded / total, `Downloading the ${d.kind} model, ${mb(loaded)} of ${mb(total)}. This happens once.`);
   } else if (d.type === 'transcribe-progress') work(null, d.total ? d.done / d.total : null, '');
-  else if (d.type === 'tag-progress') work(null, d.done / d.total, 'Listening for laughs, applause and other sounds');
   else if (d.type === 'partial') {
     // Show words as they arrive so people see it working.
-    state.project = { words: wordsFromWhisper(d.chunks), pages: [], sounds: [] };
-    react(state.project, null, { layout: state.settings.layout });
+    state.project = analyze({ words: wordsFromWhisper(d.chunks), cast: [] }, state.settings);
     refresh();
   }
 }
-const mb = (b) => `${(b / 1048576).toFixed(0)} MB`;
+const mb = (b) => `${Math.max(1, Math.round(b / 1048576))} MB`;
 
 // ------------------------------------------------------------------ elements
 const video = $('#video');
@@ -89,13 +93,12 @@ const strip = new Strip($('#stripWrap'), {
   onPick: (id) => { selectWord(id); showTab('words'); },
 });
 
-// ------------------------------------------------------------------ progress overlay
 function work(text, frac, detail) {
   $('#work').hidden = false;
   if (text) $('#workText').textContent = text;
   const bar = $('#workBar').parentElement;
-  if (frac === undefined) {} else if (frac === null) bar.classList.add('indeterminate');
-  else { bar.classList.remove('indeterminate'); $('#workBar').style.width = `${Math.round(frac * 100)}%`; }
+  if (frac === null) bar.classList.add('indeterminate');
+  else if (frac !== undefined) { bar.classList.remove('indeterminate'); $('#workBar').style.width = `${Math.round(frac * 100)}%`; }
   if (detail !== undefined) $('#workDetail').textContent = detail;
 }
 const workDone = () => { $('#work').hidden = true; };
@@ -113,7 +116,7 @@ function toast(msg, error = false, ms = 4500) {
 // ------------------------------------------------------------------ load + analyze
 async function openFile(file) {
   if (!file) return;
-  if (/\.(srt|vtt)$/i.test(file.name)) return setSubs(file);
+  if (/\.(srt|vtt|json)$/i.test(file.name)) return setSubs(file);
   if (state.busy) return;
   state.busy = true;
   state.file = file;
@@ -133,27 +136,52 @@ async function openFile(file) {
   try {
     work('Reading audio…', null, '');
     state.audio = await decodeToMono16k(file);
-    const env = envelope(state.audio.samples, state.audio.sampleRate);
-    strip.set(null, state.audio.duration, env);
+    strip.set(null, state.audio.duration, envelope(state.audio.samples, state.audio.sampleRate));
 
-    let words;
-    if (state.subs) {
-      words = wordsFromCues(parseCues(state.subs));
-      if (!words.length) throw new Error('No captions found in that subtitle file.');
+    if (state.subs?.kind === 'cwi') {
+      // A CWI document already has its styling; keep it exactly.
+      state.project = fromCWIDocument(JSON.parse(state.subs.text));
+      state.language = state.project.language;
+      state.source = JSON.parse(state.subs.text).metadata?.extractor_backend || 'imported-cwi';
+      analyze(state.project, state.settings);
     } else {
-      work('Loading speech model…', null, '');
-      downloads.clear();
-      const samples = state.audio.samples.slice();
-      const res = await ask({ type: 'transcribe', samples, model: $('#model').value, language: $('#language').value }, [samples.buffer]);
-      words = wordsFromWhisper(res.chunks);
-      if (!words.length) throw new Error('No speech was found in this video.');
+      let words;
+      if (state.subs) {
+        words = wordsFromCues(parseCues(state.subs.text));
+        if (!words.length) throw new Error('No captions were found in that subtitle file.');
+        state.source = 'imported-subtitles+browser-prosody';
+      } else {
+        work('Loading speech model…', null, '');
+        downloads.clear();
+        const samples = state.audio.samples.slice();
+        const res = await ask({ type: 'transcribe', samples, model: $('#model').value, language: $('#language').value }, [samples.buffer]);
+        words = wordsFromWhisper(res.chunks);
+        if (!words.length) throw new Error('No speech was found in this video.');
+        state.language = $('#language').value === 'auto' ? null : $('#language').value;
+        state.source = $('#speakerMode').value === 'auto' ? 'browser-whisper+pyannote' : 'browser-whisper';
+      }
+      const named = words.some((w) => w.speakerName);
+      if ($('#speakerMode').value === 'auto' && !named) {
+        try {
+          downloads.clear();
+          const samples = state.audio.samples.slice();
+          const res = await ask({ type: 'diarize', samples }, [samples.buffer]);
+          assignSpeakers(words, res.segments);
+        } catch (e) {
+          console.error(e);
+          toast(`Speaker detection didn't work (${friendlyError(e)}). Everyone is one speaker for now; you can reassign lines in Words.`, true, 9000);
+        }
+      }
+      work('Measuring pitch and volume…', null, '');
+      await new Promise((r) => setTimeout(r, 30));
+      const feats = wordFeatures(words, state.audio.samples, state.audio.sampleRate);
+      words.forEach((w, i) => (w.f = feats[i]));
+      state.project = analyze({ words, cast: [] }, state.settings);
     }
-    state.project = { words, pages: [], sounds: [] };
-    analyze(true);
     workDone();
     $('#exportBtn').disabled = false;
-    if ($('#detectSounds').checked) await detectSounds();
-    else $('#tagSoundsBtn').hidden = false;
+    refresh();
+    if (state.project.cast.length > 1) toast(`Found ${state.project.cast.length} speakers. Rename them in Speakers.`);
   } catch (e) {
     console.error(e);
     workDone();
@@ -167,47 +195,15 @@ async function openFile(file) {
 function friendlyError(e) {
   const m = e?.message || String(e);
   if (/decode|EncodingError|Unable to decode/i.test(m)) return 'This browser cannot read the audio in that file. Try an MP4 or WebM, or convert it first.';
-  if (/fetch|network|Failed to load/i.test(m)) return 'The speech model could not be downloaded. Check your connection and try again.';
+  if (/fetch|network|Failed to load|NetworkError/i.test(m)) return 'A model could not be downloaded. Check your connection and try again.';
   if (/memory|allocation/i.test(m)) return 'Ran out of memory. Pick the Fast accuracy option or use a shorter clip.';
   return m;
 }
 
-async function detectSounds() {
-  if (!state.audio || state.busy && !state.project) return;
-  $('#tagSoundsBtn').hidden = true;
-  try {
-    work('Loading sound model…', null, '');
-    downloads.clear();
-    const samples = state.audio.samples.slice();
-    const res = await ask({ type: 'tag', samples }, [samples.buffer]);
-    state.project.sounds = soundsFromTags(res.windows);
-    workDone();
-    refresh();
-    toast(state.project.sounds.length ? `Found ${state.project.sounds.length} sound${state.project.sounds.length > 1 ? 's' : ''} to tag.` : 'No laughs, applause or other sounds were found.');
-  } catch (e) {
-    console.error(e);
-    workDone();
-    $('#tagSoundsBtn').hidden = false;
-    toast(`Sound detection failed: ${friendlyError(e)}`, true, 8000);
-  }
-}
-
-/** (Re)score emphasis and regroup. Features are measured once per word. */
-function analyze(measure = false) {
-  const p = state.project;
-  if (!p) return;
-  if (measure && state.audio) {
-    const feats = wordFeatures(p.words, state.audio.samples, state.audio.sampleRate);
-    p.words.forEach((w, i) => (w.f = feats[i]));
-  }
-  scoreEmphasis(p.words, p.words.map((w) => w.f || { db: -100, hz: 0 }), { sensitivity: state.settings.sensitivity });
-  react(p, null, { layout: state.settings.layout });
-  refresh();
-}
-
-function regroup() {
+/** Re-run the mapping and grouping after any change. Manual edits are kept. */
+function reanalyze() {
   if (!state.project) return;
-  react(state.project, null, { layout: state.settings.layout });
+  analyze(state.project, state.settings);
   refresh();
 }
 
@@ -220,20 +216,19 @@ function sizeOverlay() {
   $('#frame').style.setProperty('--ar', String(vw / vh));
 }
 
-let lastPageId = null;
+let lastCapId = null;
 function draw() {
   octx.clearRect(0, 0, overlay.width, overlay.height);
   const p = state.project;
   const t = video.currentTime;
   if (p) {
-    p._byId = new Map(p.words.map((w) => [w.id, w]));
-    const page = drawCaptions(octx, p, t, state.settings);
-    const id = page?.id || null;
-    if (id !== lastPageId) {
-      lastPageId = id;
-      $$('.page.now').forEach((el) => el.classList.remove('now'));
+    const cap = drawCaptions(octx, p, t, state.settings);
+    const id = cap?.id || null;
+    if (id !== lastCapId) {
+      lastCapId = id;
+      $$('.cap.now').forEach((el) => el.classList.remove('now'));
       if (id) {
-        const el = document.querySelector(`.page[data-id="${id}"]`);
+        const el = document.querySelector(`.cap[data-id="${id}"]`);
         el?.classList.add('now');
         if (!video.paused && el && !$('[data-pane=words]').hidden) el.scrollIntoView({ block: 'nearest' });
       }
@@ -260,75 +255,89 @@ function seek(t) {
 
 function refresh() {
   const p = state.project;
-  if (p) strip.set(p, state.audio?.duration || video.duration || 1);
-  renderPages();
+  if (p) {
+    p._byId = new Map(p.words.map((w) => [w.id, w]));
+    strip.set(p, state.audio?.duration || video.duration || 1);
+  }
+  renderCaps();
+  renderCast();
+  renderCheck();
   renderStats();
   draw();
 }
 
-// ------------------------------------------------------------------ words panel
-function renderPages() {
-  const ol = $('#pages');
-  const p = state.project;
+// ------------------------------------------------------------------ words tab
+function speakerSelect(value, onChange, label) {
+  const sel = document.createElement('select');
+  sel.className = 'who';
+  sel.setAttribute('aria-label', label);
+  for (const s of state.project.cast) {
+    const o = document.createElement('option');
+    o.value = s.id;
+    o.textContent = s.name;
+    if (s.id === value) o.selected = true;
+    sel.append(o);
+  }
+  const o = document.createElement('option');
+  o.value = '__new';
+  o.textContent = 'New speaker…';
+  sel.append(o);
+  const paint = () => sel.style.setProperty('--who', state.project.cast.find((s) => s.id === sel.value)?.color || 'var(--line)');
+  paint();
+  sel.onchange = () => {
+    let id = sel.value;
+    if (id === '__new') id = newSpeakerId();
+    onChange(id);
+  };
+  return sel;
+}
+function newSpeakerId() {
+  let n = 1;
+  const ids = new Set(state.project.cast.map((s) => s.id));
+  while (ids.has(`S${n}`)) n++;
+  return `S${n}`;
+}
+
+function renderCaps() {
+  const ol = $('#caps');
   ol.innerHTML = '';
+  const p = state.project;
   if (!p) return;
-  const byId = new Map(p.words.map((w) => [w.id, w]));
+  const byId = p._byId || new Map(p.words.map((w) => [w.id, w]));
+  const colors = new Map(p.cast.map((s) => [s.id, s.color]));
   const frag = document.createDocumentFragment();
-  const items = [
-    ...p.pages.map((pg) => ({ t: pg.start, pg })),
-    ...(p.sounds || []).map((s) => ({ t: s.start, s })),
-  ].sort((a, b) => a.t - b.t);
-  for (const it of items) {
+  for (const c of p.captions) {
     const li = document.createElement('li');
-    li.className = 'page';
+    li.className = 'cap';
+    li.dataset.id = c.id;
+    li.style.setProperty('--who', colors.get(c.speaker) || 'var(--line)');
     const time = document.createElement('time');
-    time.textContent = clock(it.t);
-    const chips = document.createElement('div');
-    chips.className = 'chips';
-    if (it.s) {
-      li.style.setProperty('--mood', 'transparent');
-      const c = document.createElement('span');
-      c.className = 'chip sound';
-      c.textContent = `[${it.s.text}]`;
-      const x = document.createElement('button');
-      x.className = 'chip';
-      x.textContent = 'Remove';
-      x.style.fontSize = '12px';
-      x.onclick = () => { p.sounds = p.sounds.filter((s) => s !== it.s); refresh(); };
-      chips.append(c, x);
-    } else {
-      const pg = it.pg;
-      li.dataset.id = pg.id;
-      const moodColor = MOOD_COLORS[pg.mood];
-      li.style.setProperty('--mood', moodColor || 'var(--line)');
-      if (moodColor) li.style.setProperty('--mood-c', moodColor);
-      for (const id of pg.wordIds) {
-        const w = byId.get(id);
-        const b = document.createElement('button');
-        b.className = `chip l${w.level}${w.manual ? ' manual' : ''}${w.id === state.selected ? ' sel' : ''}`;
-        b.textContent = w.text;
-        b.dataset.word = w.id;
-        b.onclick = () => selectWord(w.id);
-        chips.append(b);
-      }
-      const sel = document.createElement('select');
-      sel.setAttribute('aria-label', 'Mood for this caption');
-      for (const m of MOODS) {
-        const o = document.createElement('option');
-        o.value = m;
-        o.textContent = MOOD_LABELS[m] + (m === pg.moodAuto && pg.moodManual ? ' (auto)' : '');
-        if (m === pg.mood) o.selected = true;
-        sel.append(o);
-      }
-      sel.onchange = () => { pg.mood = sel.value; pg.moodManual = sel.value !== pg.moodAuto; refresh(); };
-      chips.append(sel);
+    time.textContent = clock(c.start);
+    const body = document.createElement('div');
+    body.className = 'chips';
+    for (const id of c.wordIds) {
+      const w = byId.get(id);
+      const b = document.createElement('button');
+      b.className = `chip${w.emphasis ? ' emph' : ''}${Object.keys(w.manual).length ? ' manual' : ''}${w.id === state.selected ? ' sel' : ''}`;
+      b.style.fontWeight = w.weight;
+      b.style.fontSize = `${(14 * (0.6 + 0.4 * w.size)).toFixed(1)}px`;
+      b.textContent = w.text;
+      b.dataset.word = w.id;
+      b.onclick = () => selectWord(w.id);
+      body.append(b);
     }
-    li.append(time, chips);
+    body.append(speakerSelect(c.speaker, (id) => {
+      for (const wid of c.wordIds) { const w = byId.get(wid); w.speaker = id; w.speakerManual = true; }
+      reanalyze();
+    }, 'Speaker for this caption'));
+    li.append(time, body);
     frag.append(li);
   }
   ol.append(frag);
-  lastPageId = null;
+  lastCapId = null;
 }
+
+const selected = () => state.project?.words.find((w) => w.id === state.selected);
 
 function selectWord(id) {
   const w = state.project?.words.find((x) => x.id === id);
@@ -339,135 +348,199 @@ function selectWord(id) {
   $('#wordsHelp').hidden = !!w;
   if (!w) return strip.draw();
   document.querySelector(`.chip[data-word="${id}"]`)?.classList.add('sel');
-  $('#wordText').value = w.text;
-  setSeg('#wordLevel', String(w.level));
-  $('#wordAuto').disabled = !w.manual;
+  syncInspector(w);
   if (video.paused) seek(w.start + 0.01);
   else strip.draw();
 }
+function syncInspector(w) {
+  $('#wordText').value = w.text;
+  $('#wordWeight').value = w.weight;
+  $('#weightOut').textContent = w.weight;
+  $('#wordSize').value = w.size;
+  $('#sizeOut').textContent = `${w.size.toFixed(2)}×`;
+  $('#wordEmphasis').checked = w.emphasis;
+  $('#wordAuto').disabled = !Object.keys(w.manual).length;
+  $('#wordText').style.fontWeight = w.weight;
+}
+function editWord(fn) {
+  const w = selected();
+  if (!w) return;
+  fn(w);
+  reanalyze();
+  selectWord(w.id);
+}
 
-$('#wordText').addEventListener('change', (e) => {
-  const w = selected();
-  if (!w) return;
-  const text = e.target.value.trim();
-  if (!text) return;
-  w.text = text;
-  regroup();
-  selectWord(w.id);
+$('#wordText').addEventListener('change', (e) => { const t = e.target.value.trim(); if (t) editWord((w) => (w.text = t)); });
+$('#wordWeight').addEventListener('input', (e) => {
+  const w = selected(); if (!w) return;
+  w.manual.weight = Number(e.target.value);
+  w.weight = w.manual.weight;
+  syncInspector(w); draw(); strip.draw();
 });
-$('#wordLevel').addEventListener('click', (e) => {
-  const b = e.target.closest('button');
-  const w = selected();
-  if (!b || !w) return;
-  w.level = Number(b.dataset.v);
-  w.manual = w.level !== w.auto.level;
-  regroup();
-  selectWord(w.id);
+$('#wordWeight').addEventListener('change', () => editWord(() => {}));
+$('#wordSize').addEventListener('input', (e) => {
+  const w = selected(); if (!w) return;
+  w.manual.size = Number(e.target.value);
+  w.size = w.manual.size;
+  syncInspector(w); draw(); strip.draw();
 });
-$('#wordAuto').addEventListener('click', () => {
-  const w = selected();
-  if (!w) return;
-  w.manual = false;
-  w.level = w.auto.level;
-  regroup();
-  selectWord(w.id);
-});
+$('#wordSize').addEventListener('change', () => editWord(() => {}));
+$('#wordEmphasis').addEventListener('change', (e) => editWord((w) => (w.manual.emphasis = e.target.checked)));
+$('#wordAuto').addEventListener('click', () => editWord((w) => (w.manual = {})));
 $('#wordDelete').addEventListener('click', () => {
   const w = selected();
   if (!w) return;
   state.project.words = state.project.words.filter((x) => x !== w);
   selectWord(null);
-  regroup();
+  reanalyze();
 });
-const selected = () => state.project?.words.find((w) => w.id === state.selected);
 
-// ------------------------------------------------------------------ settings UI
+// ------------------------------------------------------------------ speakers tab
+function renderCast() {
+  const ul = $('#cast');
+  ul.innerHTML = '';
+  const p = state.project;
+  if (!p) return;
+  for (const s of p.cast) {
+    const li = document.createElement('li');
+    li.className = 'speaker';
+    li.style.setProperty('--who', s.color);
+    const count = p.words.filter((w) => w.speaker === s.id).length;
+    const name = document.createElement('input');
+    name.type = 'text';
+    name.value = s.name;
+    name.setAttribute('aria-label', `Name for ${s.name}`);
+    name.onchange = () => { s.name = name.value.trim() || s.name; refresh(); };
+    const meta = document.createElement('small');
+    const vp = s.voice_profile;
+    meta.textContent = `${count} word${count === 1 ? '' : 's'}${vp ? `, usual pitch ${Math.round(vp.pitch_baseline_hz)} Hz` : ''}`;
+    const swatches = document.createElement('div');
+    swatches.className = 'swatches';
+    const used = new Set(p.cast.filter((x) => x !== s).map((x) => x.color.toLowerCase()));
+    for (const c of SPEAKER_COLORS) {
+      const b = document.createElement('button');
+      b.className = 'swatch';
+      b.style.background = c;
+      b.title = used.has(c.toLowerCase()) ? `${c} (used by another speaker)` : c;
+      b.setAttribute('aria-label', `Use color ${c}`);
+      b.setAttribute('aria-pressed', String(c.toLowerCase() === s.color.toLowerCase()));
+      b.disabled = used.has(c.toLowerCase());
+      b.onclick = () => { s.color = c; refresh(); };
+      swatches.append(b);
+    }
+    const custom = document.createElement('input');
+    custom.type = 'color';
+    custom.value = s.color;
+    custom.title = 'Pick any color';
+    custom.setAttribute('aria-label', 'Pick any color');
+    custom.oninput = () => { s.color = custom.value.toUpperCase(); draw(); };
+    custom.onchange = () => {
+      refresh();
+      const r = contrastRatio(s.color, '#1a1a1a');
+      if (r < 4.5) toast(`That color is hard to read on dark backgrounds (${r.toFixed(1)}:1, needs 4.5:1). Try a lighter shade.`, true, 7000);
+    };
+    swatches.append(custom);
+    const head = document.createElement('div');
+    head.className = 'speaker-head';
+    head.append(name, meta);
+    li.append(head, swatches);
+    if (p.cast.length > 1) {
+      const merge = document.createElement('select');
+      merge.className = 'merge';
+      merge.setAttribute('aria-label', `Merge ${s.name} into another speaker`);
+      merge.innerHTML = `<option value="">Merge into…</option>` + p.cast.filter((x) => x !== s).map((x) => `<option value="${x.id}">${escapeHtml(x.name)}</option>`).join('');
+      merge.onchange = () => {
+        if (!merge.value) return;
+        for (const w of p.words) if (w.speaker === s.id) { w.speaker = merge.value; w.speakerManual = true; }
+        reanalyze();
+        toast(`Merged ${s.name} into ${p.cast.find((x) => x.id === merge.value)?.name}.`);
+      };
+      li.append(merge);
+    }
+    ul.append(li);
+  }
+}
+const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+
+// ------------------------------------------------------------------ check tab
+function currentDoc() {
+  return toCWIDocument(state.project, {
+    title: state.file?.name?.replace(/\.[^.]+$/, ''),
+    duration: state.audio?.duration || video.duration,
+    language: state.language || 'und',
+    backend: state.source,
+  });
+}
+function renderCheck() {
+  const p = state.project;
+  const badge = $('#checkBadge');
+  if (!p || !p.captions.length) { $('#score').innerHTML = ''; $('#rules').innerHTML = ''; badge.hidden = true; return; }
+  const doc = currentDoc();
+  const r = validate(doc);
+  badge.hidden = false;
+  badge.textContent = r.overall_score;
+  badge.classList.toggle('fail', !r.passed);
+  const pillar = (name, label) => {
+    const x = r.pillars[name];
+    return `<div class="pillar ${x.passed ? 'ok' : 'bad'}"><b>${x.score}</b><span>${label}</span></div>`;
+  };
+  $('#score').innerHTML = `<div class="overall ${r.passed ? 'ok' : 'bad'}"><b>${r.overall_score}</b><span>${r.passed ? 'Meets CWI' : 'Needs fixes'}</span></div>
+    ${pillar('attribution', 'Speakers')}${pillar('synchronization', 'Timing')}${pillar('intonation', 'Intonation')}`;
+  const capIdByDoc = new Map(doc.captions.map((c, i) => [c.id, p.captions[i]?.id]));
+  $('#rules').innerHTML = RULE_LIST.map((rule) => {
+    const found = r.rules[rule.id];
+    const items = found.slice(0, 4).map((f) => {
+      const cap = f.location?.caption_id ? capIdByDoc.get(f.location.caption_id) : null;
+      return `<li>${cap ? `<button class="link" data-cap="${cap}">${escapeHtml(f.message)}</button>` : escapeHtml(f.message)}${f.suggestion ? ` <small>${escapeHtml(f.suggestion)}</small>` : ''}</li>`;
+    }).join('');
+    const more = found.length > 4 ? `<li><small>and ${found.length - 4} more</small></li>` : '';
+    const sev = found[0]?.severity;
+    return `<li class="rule ${found.length ? sev : 'pass'}"><span class="mark" aria-hidden="true"></span><span>${rule.label}<small>${rule.id}</small></span>${found.length ? `<ul>${items}${more}</ul>` : ''}</li>`;
+  }).join('');
+}
+$('#rules').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-cap]');
+  if (!b) return;
+  const c = state.project.captions.find((x) => x.id === b.dataset.cap);
+  if (c) { seek(c.start + 0.01); showTab('words'); document.querySelector(`.cap[data-id="${c.id}"]`)?.scrollIntoView({ block: 'center' }); }
+});
+
+function renderStats() {
+  const p = state.project;
+  const el = $('#stats');
+  if (!p || !p.words.length) { el.textContent = ''; return; }
+  const bold = p.words.filter((w) => w.weight > CWI.WEIGHT_DEFAULT).length;
+  const thin = p.words.filter((w) => w.weight < CWI.WEIGHT_DEFAULT).length;
+  const emph = p.words.filter((w) => w.emphasis).length;
+  el.textContent = `${p.words.length} words: ${bold} bolder, ${thin} thinner, ${emph} emphasized.`;
+}
+
+// ------------------------------------------------------------------ style tab
 function setSeg(sel, value) {
   $$(`${sel} button`).forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.v === value)));
 }
-
-function buildPresets() {
-  const box = $('#presets');
-  for (const [key, p] of Object.entries(PRESETS)) {
-    const b = document.createElement('button');
-    b.className = 'preset';
-    b.dataset.v = key;
-    const c = document.createElement('canvas');
-    c.width = 300; c.height = 128;
-    const label = document.createElement('span');
-    label.innerHTML = `${p.label}<small>${p.hint}</small>`;
-    b.append(c, label);
-    b.onclick = () => { state.settings.preset = key; saveSettings(); syncSettings(); draw(); };
-    box.append(b);
-  }
-  drawPresetThumbs();
-}
-
-const SAMPLE = (() => {
-  const words = [
-    { id: 'a', text: 'this', start: 0, end: 0.3, level: 0 },
-    { id: 'b', text: 'is', start: 0.3, end: 0.5, level: 0 },
-    { id: 'c', text: 'huge!', start: 0.5, end: 2, level: 3 },
-  ];
-  return { words, pages: [{ id: 'pg', wordIds: ['a', 'b', 'c'], start: 0, end: 3, mood: 'excited' }], sounds: [] };
-})();
-function drawPresetThumbs() {
-  $$('.preset').forEach((b) => {
-    const c = b.querySelector('canvas');
-    const ctx = c.getContext('2d');
-    ctx.clearRect(0, 0, c.width, c.height);
-    drawCaptions(ctx, SAMPLE, 0.75, { ...state.settings, sizeRef: 400, preset: b.dataset.v, position: 'middle', layout: 'long', react: { ...state.settings.react, motion: false, sounds: false } });
-  });
-}
-
 function syncSettings() {
   const s = state.settings;
-  $$('.preset').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.v === s.preset)));
-  setSeg('#position', s.position);
-  setSeg('#layout', s.layout);
-  $$('[data-react]').forEach((i) => (i.checked = !!s.react[i.dataset.react]));
+  for (const k of ['position', 'layout', 'textSize', 'backing']) setSeg(`#${k}`, s[k]);
+  $('#names').checked = !!s.names;
   $('#sensitivity').value = s.sensitivity;
 }
-
-$('#position').addEventListener('click', (e) => {
-  const b = e.target.closest('button'); if (!b) return;
-  state.settings.position = b.dataset.v; saveSettings(); syncSettings(); draw();
-});
-$('#layout').addEventListener('click', (e) => {
-  const b = e.target.closest('button'); if (!b) return;
-  state.settings.layout = b.dataset.v; saveSettings(); syncSettings(); regroup();
-});
-$$('[data-react]').forEach((i) => i.addEventListener('change', () => {
-  state.settings.react[i.dataset.react] = i.checked; saveSettings(); drawPresetThumbs(); draw();
-}));
+for (const k of ['position', 'layout', 'textSize', 'backing']) {
+  $(`#${k}`).addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    state.settings[k] = b.dataset.v;
+    saveSettings(); syncSettings();
+    k === 'layout' ? reanalyze() : draw();
+  });
+}
+$('#names').addEventListener('change', (e) => { state.settings.names = e.target.checked; saveSettings(); draw(); });
 let sensTimer;
 $('#sensitivity').addEventListener('input', (e) => {
   state.settings.sensitivity = Number(e.target.value);
   saveSettings();
   clearTimeout(sensTimer);
-  sensTimer = setTimeout(() => analyze(false), 60);
+  sensTimer = setTimeout(reanalyze, 60);
 });
-$('#tagSoundsBtn').addEventListener('click', detectSounds);
-
-function renderStats() {
-  const p = state.project;
-  const el = $('#reactStats');
-  if (!p || !p.words.length) { el.textContent = ''; return; }
-  const n = [0, 0, 0, 0];
-  p.words.forEach((w) => n[w.level]++);
-  el.textContent = `${p.words.length} words: ${n[1]} stressed, ${n[2]} strong, ${n[3]} shouted.`;
-}
-
-function buildLegend() {
-  const notes = {
-    neutral: 'Steady delivery',
-    excited: 'Loud and high, or exclamations',
-    angry: 'Loud and low, or harsh words',
-    soft: 'Quiet, or sad words',
-    question: 'Ends in a question',
-  };
-  $('#legend').innerHTML = MOODS.map((m) => `<li><i style="background:${MOOD_COLORS[m] || 'var(--neutral)'}"></i>${MOOD_LABELS[m]} <span>${notes[m]}</span></li>`).join('');
-}
 
 function showTab(name) {
   $$('.tabs button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
@@ -476,20 +549,38 @@ function showTab(name) {
 $('.tabs').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) showTab(b.dataset.tab); });
 
 // ------------------------------------------------------------------ files in
-function setSubs(file) {
-  file.text().then((txt) => {
-    state.subs = txt;
-    const n = parseCues(txt).length;
-    $('#subsName').textContent = n ? `${file.name}: ${n} captions. Now choose the video.` : `${file.name} has no captions I can read.`;
-    if (!n) state.subs = null;
-    if (n && state.file && state.audio && !state.busy) {
-      // Video already open: swap in the imported text.
-      state.project = { words: wordsFromCues(parseCues(txt)), pages: [], sounds: state.project?.sounds || [] };
-      analyze(true);
-      $('#exportBtn').disabled = false;
-      toast(`Using ${n} captions from ${file.name}.`);
+async function setSubs(file) {
+  const text = await file.text();
+  let kind = 'cues', n = 0;
+  if (/\.json$/i.test(file.name) || text.trimStart().startsWith('{')) {
+    try {
+      const doc = JSON.parse(text);
+      fromCWIDocument(doc);
+      kind = 'cwi';
+      n = doc.captions.length;
+    } catch (e) {
+      $('#subsName').textContent = `${file.name} is not a CWI file.`;
+      return;
     }
-  });
+  } else n = parseCues(text).length;
+  if (!n) { $('#subsName').textContent = `${file.name} has no captions I can read.`; state.subs = null; return; }
+  state.subs = { kind, text, name: file.name };
+  $('#subsName').textContent = `${file.name}: ${n} captions. Now choose the video.`;
+  if (state.file && state.audio && !state.busy) {
+    // Video already open: swap in the imported captions.
+    if (kind === 'cwi') {
+      state.project = fromCWIDocument(JSON.parse(text));
+      analyze(state.project, state.settings);
+    } else {
+      const words = wordsFromCues(parseCues(text));
+      const feats = wordFeatures(words, state.audio.samples, state.audio.sampleRate);
+      words.forEach((w, i) => (w.f = feats[i]));
+      state.project = analyze({ words, cast: [] }, state.settings);
+    }
+    $('#exportBtn').disabled = false;
+    refresh();
+    toast(`Using ${n} captions from ${file.name}.`);
+  }
 }
 $('#fileInput').addEventListener('change', (e) => openFile(e.target.files[0]));
 $('#subsInput').addEventListener('change', (e) => e.target.files[0] && setSubs(e.target.files[0]));
@@ -497,11 +588,11 @@ $('#subsInput').addEventListener('change', (e) => e.target.files[0] && setSubs(e
 const drop = $('#drop');
 ['dragenter', 'dragover'].forEach((ev) => document.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); }));
 ['dragleave', 'drop'].forEach((ev) => document.addEventListener(ev, (e) => { e.preventDefault(); if (ev === 'drop' || e.target === document.documentElement) drop.classList.remove('over'); }));
-document.addEventListener('drop', (e) => {
+document.addEventListener('drop', async (e) => {
   const files = [...(e.dataTransfer?.files || [])];
-  const subs = files.find((f) => /\.(srt|vtt)$/i.test(f.name));
+  const subs = files.find((f) => /\.(srt|vtt|json)$/i.test(f.name));
   const media = files.find((f) => /^(video|audio)\//.test(f.type) || /\.(mp4|mov|webm|mkv|m4a|mp3|wav)$/i.test(f.name));
-  if (subs) setSubs(subs);
+  if (subs) await setSubs(subs);
   if (media) openFile(media);
 });
 
@@ -510,16 +601,16 @@ $('#newBtn').addEventListener('click', () => {
   video.pause();
   video.removeAttribute('src');
   video.load();
-  Object.assign(state, { file: null, audio: null, project: null, selected: null, subs: null });
+  Object.assign(state, { file: null, audio: null, project: null, selected: null, subs: null, language: null });
   $('#subsName').textContent = '';
   $('#fileInput').value = '';
+  $('#subsInput').value = '';
   $('#drop').hidden = false;
   $('#player').hidden = true;
   $('#newBtn').hidden = true;
   $('#fileName').hidden = true;
   $('#exportBtn').disabled = true;
-  $('#tagSoundsBtn').hidden = true;
-  renderPages();
+  refresh();
 });
 
 // ------------------------------------------------------------------ transport
@@ -544,23 +635,23 @@ document.addEventListener('click', (e) => { if (!menu.contains(e.target)) { menu
 menuList.addEventListener('keydown', (e) => { if (e.key === 'Escape') { menuList.hidden = true; $('#exportBtn').focus(); } });
 
 const baseName = () => (state.file?.name || 'captions').replace(/\.[^.]+$/, '');
-menuList.addEventListener('click', async (e) => {
+menuList.addEventListener('click', (e) => {
   const b = e.target.closest('[data-export]');
   if (!b || !state.project) return;
   menuList.hidden = true;
-  const kind = b.dataset.export;
   const p = state.project;
-  const s = state.settings;
+  const kind = b.dataset.export;
   if (kind === 'srt') download(`${baseName()}.srt`, toSRT(p), 'application/x-subrip');
   if (kind === 'vtt') download(`${baseName()}.vtt`, toVTT(p), 'text/vtt');
-  if (kind === 'ass') download(`${baseName()}.ass`, toASS(p, { width: video.videoWidth || 1080, height: video.videoHeight || 1920, preset: s.preset, position: s.position, react: s.react }), 'text/plain');
+  if (kind === 'cwi') download(`${baseName()}.cwi.json`, toCWIJSON(p, { title: baseName(), duration: state.audio?.duration || video.duration, language: state.language || 'und', backend: state.source }), 'application/json');
+  if (kind === 'ass') download(`${baseName()}.ass`, toASS(p, { width: video.videoWidth || 1080, height: video.videoHeight || 1920, ...state.settings }), 'text/plain');
   if (kind === 'video') exportVideo();
 });
 
 async function exportVideo() {
   if (state.busy) return;
   if (!window.MediaRecorder || !HTMLCanvasElement.prototype.captureStream) {
-    toast('This browser cannot record video. Use Chrome, Edge or a recent Safari, or export the .ass file.', true, 8000);
+    toast('This browser cannot record video. Use Chrome or Edge, or export the .ass file and burn it in with ffmpeg.', true, 8000);
     return;
   }
   state.busy = true;
@@ -574,9 +665,8 @@ async function exportVideo() {
   cancel.onclick = () => ctrl.abort();
   $('#work').append(cancel);
   try {
-    await document.fonts.load(`${PRESETS[state.settings.preset].weight} 40px ${PRESETS[state.settings.preset].font}`).catch(() => {});
+    await loadFonts();
     const p = state.project;
-    p._byId = new Map(p.words.map((w) => [w.id, w]));
     const { blob, ext } = await burnIn(state.url, (ctx, t) => drawCaptions(ctx, p, t, state.settings), {
       signal: ctrl.signal,
       onProgress: (f) => work(null, f),
@@ -593,11 +683,13 @@ async function exportVideo() {
 }
 
 // ------------------------------------------------------------------ boot
-buildPresets();
-buildLegend();
+function loadFonts() {
+  return Promise.all([100, 400, 900].map((w) => document.fonts?.load(`${w} 40px ${FONT}`))).catch(() => {});
+}
 syncSettings();
-document.fonts?.ready.then(() => { drawPresetThumbs(); draw(); });
+loadFonts().then(draw);
+document.fonts?.ready.then(draw);
 window.addEventListener('beforeunload', (e) => { if (state.busy) e.preventDefault(); });
 
-// Test hook: load a project without running the models (used by the browser tests).
-window.__rc = { state, openFile, analyze, refresh };
+// Test hook for the browser tests.
+window.__rc = { state, openFile, reanalyze, refresh };

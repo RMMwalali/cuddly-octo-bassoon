@@ -1,75 +1,94 @@
-// Draws reactive captions for time `t` onto a 2D canvas context.
-// Used for the live preview and, frame by frame, for the burned-in export.
+// Draws CWI captions for time `t` onto a 2D canvas. Used for the live preview
+// and, frame by frame, for the burned-in video export.
+//
+// Per word: Roboto Flex at the word's weight, scaled by its size; white until
+// spoken, then easing to the speaker's color over 600 ms; emphasized words
+// bounce 15% upward over the same 600 ms.
 
-import { PRESETS, POSITIONS, MOOD_COLORS, emphasisColor } from './presets.js';
+import { CWI } from './cwi.js';
+
+export const FONT = '"Roboto Flex", "Roboto", system-ui, sans-serif';
+export const POSITIONS = { top: 0.18, middle: 0.62, bottom: 0.84 };
+export const TEXT_SIZES = { small: 0.05, medium: 0.062, large: 0.076 };
+export const DEFAULT_SETTINGS = {
+  position: 'bottom',
+  layout: 'short',
+  textSize: 'medium',
+  backing: 'outline', // 'outline' | 'box'
+  names: false,
+  sensitivity: 1,
+};
 
 const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
-const easeOutBack = (x) => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * (x - 1) ** 3 + c1 * (x - 1) ** 2; };
-const easeOutCubic = (x) => 1 - (1 - x) ** 3;
 
-/** Find the page on screen at time t (binary search; pages are sorted). */
-export function pageAt(pages, t) {
-  let lo = 0, hi = pages.length - 1;
+/** CSS `ease`, i.e. cubic-bezier(0.25, 0.1, 0.25, 1), solved for y at x. */
+export function ease(x) {
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  let t = x;
+  for (let i = 0; i < 8; i++) {
+    const bx = 0.75 * t * (1 - t) ** 2 + 0.75 * t * t * (1 - t) + t ** 3 - x;
+    const d = 0.75 * (1 - t) ** 2 + 2.25 * t * t;
+    t = clamp(t - bx / (d || 1));
+  }
+  return 0.3 * t * (1 - t) ** 2 + 3 * t * t * (1 - t) + t ** 3;
+}
+
+function hexRgb(hex) {
+  const h = hex.replace('#', '');
+  return [0, 2, 4].map((i) => parseInt(h.substr(i, 2), 16));
+}
+function mix(a, b, k) {
+  const A = hexRgb(a), B = hexRgb(b);
+  return `rgb(${A.map((v, i) => Math.round(v + (B[i] - v) * k)).join(',')})`;
+}
+
+/** The caption on screen at time t (binary search; captions are sorted). */
+export function captionAt(captions, t) {
+  let lo = 0, hi = captions.length - 1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    const p = pages[mid];
-    if (t < p.start) hi = mid - 1;
-    else if (t >= p.end) lo = mid + 1;
-    else return p;
+    const c = captions[mid];
+    if (t < c.start) hi = mid - 1;
+    else if (t >= c.end) lo = mid + 1;
+    else return c;
   }
   return null;
 }
 
-function wordText(w, preset, reactSize) {
-  const upper = preset.upper || (reactSize && w.level === 3);
-  return upper ? w.text.toUpperCase() : w.text;
-}
+const fontFor = (w, px) => `${w.weight} ${Math.round(px)}px ${FONT}`;
 
-function fontFor(preset, px, w, reactSize) {
-  const weight = preset.emphasisWeight && reactSize && w.level >= 2 ? preset.emphasisWeight : preset.weight;
-  return `${weight} ${Math.round(px)}px ${preset.font}`;
-}
-
-/** Lay out a page's words into centered lines. */
-export function layoutPage(ctx, page, byId, W, H, settings) {
-  const preset = PRESETS[settings.preset] || PRESETS.pop;
-  const R = settings.react;
-  const base = (settings.sizeRef ?? Math.min(W, H)) * preset.size * (page.mood === 'soft' && R.motion ? 0.94 : 1);
+export function layoutCaption(ctx, cap, byId, W, H, settings) {
+  const base = (settings.sizeRef ?? Math.min(W, H)) * (TEXT_SIZES[settings.textSize] || TEXT_SIZES.medium);
   const maxW = W * 0.86;
-  const items = page.wordIds.map((id) => byId.get(id)).filter(Boolean).map((w) => {
-    const px = base * (R.size ? preset.scales[w.level] || 1 : 1);
-    const text = wordText(w, preset, R.size);
-    ctx.font = fontFor(preset, px, w, R.size);
-    // Extra gap leaves room for the active-word bump and shout scale.
-    return { w, text, px, width: ctx.measureText(text).width, space: ctx.measureText(' ').width + px * 0.1 };
+  const items = cap.wordIds.map((id) => byId.get(id)).filter(Boolean).map((w) => {
+    const px = base * w.size;
+    ctx.font = fontFor(w, px);
+    // Bigger words get more room so the emphasis bounce never touches a neighbour.
+    return { w, px, width: ctx.measureText(w.text).width, space: Math.max(base, px) * 0.3 + (w.emphasis ? px * 0.08 : 0) };
   });
   const lines = [];
   let line = { items: [], width: 0, h: 0 };
   for (const it of items) {
     const add = (line.items.length ? it.space : 0) + it.width;
-    if (line.items.length && line.width + add > maxW) {
-      lines.push(line);
-      line = { items: [], width: 0, h: 0 };
-    }
+    if (line.items.length && line.width + add > maxW) { lines.push(line); line = { items: [], width: 0, h: 0 }; }
     line.width += (line.items.length ? it.space : 0) + it.width;
-    line.h = Math.max(line.h, it.px * 1.18);
+    line.h = Math.max(line.h, it.px * 1.22);
     line.items.push(it);
   }
   if (line.items.length) lines.push(line);
   const total = lines.reduce((a, l) => a + l.h, 0);
-  const cy = H * (POSITIONS[settings.position] ?? POSITIONS.middle);
-  let y = cy - total / 2;
+  const cy = H * (POSITIONS[settings.position] ?? POSITIONS.bottom);
+  let y = Math.max(base * 0.6, Math.min(cy - total / 2, H - total - base * 0.6));
+  const top = y;
   for (const l of lines) {
-    l.y = y + l.h / 2;
+    l.top = y;
+    l.baseline = y + l.h * 0.8; // words of different sizes share one baseline
     y += l.h;
     let x = W / 2 - l.width / 2;
-    for (const it of l.items) {
-      it.x = x + it.width / 2;
-      it.y = l.y;
-      x += it.width + it.space;
-    }
+    for (const it of l.items) { it.x = x; it.y = l.baseline; x += it.width + it.space; }
   }
-  return { lines, top: cy - total / 2, bottom: cy + total / 2, base, preset };
+  return { lines, top, bottom: y, base };
 }
 
 function roundRect(ctx, x, y, w, h, r) {
@@ -82,151 +101,71 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-function drawWord(ctx, it, preset, color, { scale = 1, alpha = 1, dx = 0, dy = 0, rot = 0, sweep = null, R }) {
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.translate(it.x + dx, it.y + dy);
-  if (rot) ctx.rotate(rot);
-  ctx.scale(scale, scale);
-  ctx.font = fontFor(preset, it.px, it.w, R.size);
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.lineJoin = 'round';
-  if (preset.strokeW > 0) {
-    ctx.lineWidth = it.px * preset.strokeW;
-    ctx.strokeStyle = preset.stroke;
-    if (preset.shadow) {
-      ctx.shadowColor = 'rgba(0,0,0,0.55)';
-      ctx.shadowBlur = it.px * 0.18;
-      ctx.shadowOffsetY = it.px * 0.06;
-    }
-    ctx.strokeText(it.text, 0, 0);
-    ctx.shadowColor = 'transparent';
-  }
-  ctx.fillStyle = color;
-  ctx.fillText(it.text, 0, 0);
-  if (sweep && sweep.p > 0) {
-    // Karaoke: repaint the spoken part of the word in the bright color.
-    ctx.beginPath();
-    ctx.rect(-it.width / 2 - it.px, -it.px, it.width * sweep.p + it.px, it.px * 2);
-    ctx.clip();
-    ctx.fillStyle = sweep.color;
-    ctx.fillText(it.text, 0, 0);
-  }
-  ctx.restore();
-}
-
-/**
- * Draw all captions for time t. `project` = { words, pages, sounds }.
- * Returns the page that was drawn (handy for UI sync).
- */
+/** Draw the captions at time t. `project` = { words, cast, captions }. Returns the caption drawn. */
 export function drawCaptions(ctx, project, t, settings) {
   const W = ctx.canvas.width, H = ctx.canvas.height;
-  const R = settings.react;
   const byId = project._byId || new Map(project.words.map((w) => [w.id, w]));
-  const page = pageAt(project.pages, t);
-  let top = H * (POSITIONS[settings.position] ?? POSITIONS.middle);
+  const cap = captionAt(project.captions, t);
+  if (!cap) return null;
+  const speaker = project.cast.find((s) => s.id === cap.speaker);
+  const color = speaker?.color || '#FFFFFF';
+  const L = layoutCaption(ctx, cap, byId, W, H, settings);
+  const enter = clamp((t - cap.start) / 0.12);
+  const anim = CWI.ANIMATION_MS / 1000;
 
-  if (page) {
-    const L = layoutPage(ctx, page, byId, W, H, settings);
-    const { preset } = L;
-    top = L.top;
-    const mood = page.mood;
-    const emph = emphasisColor(preset, mood, R.color);
-    const enter = clamp((t - page.start) / 0.12);
+  ctx.save();
+  ctx.globalAlpha = enter;
+  if (settings.backing === 'box') {
+    ctx.fillStyle = 'rgba(26,26,26,0.86)';
+    for (const l of L.lines) {
+      const padX = L.base * 0.4, padY = L.base * 0.08;
+      roundRect(ctx, W / 2 - l.width / 2 - padX, l.top - padY, l.width + padX * 2, l.h + padY * 2, L.base * 0.2);
+      ctx.fill();
+    }
+  }
+  if (settings.names && speaker) {
+    const px = L.base * 0.5;
+    ctx.font = `600 ${Math.round(px)}px ${FONT}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
+    const y = L.top - px * 0.45;
+    ctx.lineWidth = px * 0.25;
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+    ctx.strokeText(speaker.name, W / 2, y);
+    ctx.fillStyle = color;
+    ctx.fillText(speaker.name, W / 2, y);
+  }
 
-    if (preset.box) {
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.lineJoin = 'round';
+  for (const l of L.lines) {
+    for (const it of l.items) {
+      const { w } = it;
+      const k = t >= w.start ? ease((t - w.start) / anim) : 0;
+      let scale = 1;
+      if (w.emphasis && t >= w.start && t < w.start + anim) scale = 1 + CWI.BOUNCE * Math.sin((Math.PI * (t - w.start)) / anim);
       ctx.save();
-      ctx.globalAlpha = 0.62 * enter;
-      ctx.fillStyle = '#000';
-      for (const l of L.lines) {
-        const padX = L.base * 0.45, padY = L.base * 0.12;
-        roundRect(ctx, W / 2 - l.width / 2 - padX, l.y - l.h / 2 - padY / 2, l.width + padX * 2, l.h + padY, L.base * 0.25);
-        ctx.fill();
+      // Scale from the word's bottom center so the bounce rises upward.
+      ctx.translate(it.x + it.width / 2, it.y);
+      ctx.scale(scale, scale);
+      ctx.font = fontFor(w, it.px);
+      if (settings.backing !== 'box') {
+        // Thinner strokes on thin type so light weights stay legible, not hollow.
+        ctx.lineWidth = it.px * (0.07 + 0.08 * (w.weight / 900));
+        ctx.strokeStyle = 'rgba(0,0,0,0.9)';
+        ctx.shadowColor = 'rgba(0,0,0,0.5)';
+        ctx.shadowBlur = it.px * 0.15;
+        ctx.shadowOffsetY = it.px * 0.04;
+        ctx.strokeText(w.text, -it.width / 2, 0);
+        ctx.shadowColor = 'transparent';
       }
+      ctx.fillStyle = k > 0 ? mix('#FFFFFF', color, k) : '#FFFFFF';
+      ctx.fillText(w.text, -it.width / 2, 0);
       ctx.restore();
     }
-
-    const all = L.lines.flatMap((l) => l.items);
-    all.forEach((it, i) => {
-      const w = it.w;
-      const next = all[i + 1]?.w;
-      const activeEnd = next ? Math.max(w.end, next.start) : page.end;
-      const spoken = t >= w.start;
-      const active = spoken && t < activeEnd;
-      const k = clamp((t - w.start) / 0.2);
-      let scale = 1, alpha = 1, dx = 0, dy = 0, rot = 0, color = preset.fill, sweep = null;
-
-      if (preset.reveal === 'word') {
-        if (!spoken) return;
-        scale = 0.55 + 0.45 * easeOutBack(clamp((t - w.start) / 0.16));
-        alpha = clamp((t - w.start) / 0.06);
-        color = w.level >= 2 && R.color ? emph : preset.fill;
-      } else {
-        scale = 0.9 + 0.1 * easeOutCubic(enter);
-        alpha = enter;
-        if (preset.reveal === 'sweep') {
-          sweep = {
-            p: spoken ? clamp((t - w.start) / Math.max(0.05, w.end - w.start)) : 0,
-            color: w.level >= 2 && R.color ? emph : preset.accent,
-          };
-        } else if (active) {
-          color = w.level >= 2 && R.color ? emph : preset.accent;
-        } else if (w.level >= 2 && R.color) {
-          color = emph;
-        }
-        if (active && preset.bump && R.motion) scale *= 1 + preset.bump * Math.sin(Math.PI * k);
-        if (preset.box && w.level >= 1 && R.color && MOOD_COLORS[mood]) color = MOOD_COLORS[mood];
-      }
-
-      if (R.motion && active) {
-        if (w.level === 3) {
-          // Shout: brief shake on landing.
-          const decay = 1 - clamp((t - w.start) / 0.35);
-          dx = Math.sin(t * 95) * it.px * 0.05 * decay;
-          dy = Math.cos(t * 83) * it.px * 0.04 * decay;
-        }
-        if (mood === 'excited' && preset.reveal !== 'sweep') dy -= Math.sin(Math.PI * k) * it.px * 0.12;
-        if (mood === 'angry' && w.level >= 2) dx += Math.sin(t * 70) * it.px * 0.025;
-        if (mood === 'question' && w === all[all.length - 1].w) rot = 0.06 * Math.sin(Math.PI * k);
-      }
-      drawWord(ctx, it, preset, color, { scale, alpha, dx, dy, rot, sweep, R });
-    });
   }
-
-  if (R.sounds && project.sounds?.length) {
-    const live = project.sounds.filter((s) => t >= s.start && t < s.end);
-    if (live.length) drawSoundTags(ctx, live, t, top, W, H, settings);
-  }
-  return page;
-}
-
-function drawSoundTags(ctx, sounds, t, top, W, H, settings) {
-  const preset = PRESETS[settings.preset] || PRESETS.pop;
-  const px = Math.min(W, H) * 0.032;
-  ctx.save();
-  ctx.font = `700 ${Math.round(px)}px ${preset.font}`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  const labels = sounds.map((s) => `[${s.text}]`);
-  const widths = labels.map((l) => ctx.measureText(l).width + px * 1.4);
-  const gap = px * 0.5;
-  let x = W / 2 - (widths.reduce((a, b) => a + b, 0) + gap * (widths.length - 1)) / 2;
-  const y = Math.max(px * 1.5, top - px * 1.6);
-  sounds.forEach((s, i) => {
-    const a = clamp((t - s.start) / 0.15) * clamp((s.end - t) / 0.2);
-    const pop = 0.7 + 0.3 * easeOutBack(clamp((t - s.start) / 0.2));
-    ctx.save();
-    ctx.globalAlpha = a;
-    ctx.translate(x + widths[i] / 2, y);
-    ctx.scale(pop, pop);
-    ctx.fillStyle = 'rgba(0,0,0,0.7)';
-    roundRect(ctx, -widths[i] / 2, -px * 0.85, widths[i], px * 1.7, px * 0.85);
-    ctx.fill();
-    ctx.fillStyle = '#FFD23F';
-    ctx.fillText(labels[i], 0, px * 0.04);
-    ctx.restore();
-    x += widths[i] + gap;
-  });
   ctx.restore();
+  return cap;
 }

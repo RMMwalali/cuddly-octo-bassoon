@@ -1,8 +1,10 @@
 // Runs the AI models off the main thread: Whisper for word-timed transcripts and
-// an AudioSet classifier for non-speech sounds. Models download once from the
+// pyannote segmentation for who is speaking when. Models download once from the
 // Hugging Face Hub and are cached by the browser; audio never leaves the device.
 
-import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1';
+import {
+  pipeline, env, AutoProcessor, AutoModelForAudioFrameClassification,
+} from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1';
 
 env.allowLocalModels = false;
 
@@ -107,29 +109,33 @@ async function transcribe({ samples, model, language }) {
   return words;
 }
 
-async function tagSounds({ samples }) {
-  const clf = await load('audio-classification', 'Xenova/ast-finetuned-audioset-10-10-0.4593', 'sound');
-  const win = 2 * SR, hop = 1 * SR;
-  const windows = [];
-  const steps = Math.max(1, Math.ceil((samples.length - win) / hop) + 1);
-  for (let k = 0; k < steps; k++) {
-    const s = k * hop;
-    const piece = samples.subarray(s, Math.min(samples.length, s + win));
-    if (piece.length < SR * 0.5) break;
-    if (rms(piece) < 0.003) continue;
-    const labels = await clf(piece, { top_k: 12 });
-    windows.push({ start: s / SR, end: (s + piece.length) / SR, labels });
-    if (k % 3 === 0) post({ type: 'tag-progress', done: k + 1, total: steps });
+const DIARIZER = 'onnx-community/pyannote-segmentation-3.0';
+let diarizer = null;
+
+/**
+ * Speaker segments for the whole clip: [{ id, start, end, confidence }].
+ * The model is small (~6 MB) and runs on the CPU.
+ */
+async function diarize({ samples }) {
+  if (!diarizer) {
+    post({ type: 'status', text: 'Loading speaker model…' });
+    const [processor, model] = await Promise.all([
+      AutoProcessor.from_pretrained(DIARIZER, { progress_callback: progress('speaker') }),
+      AutoModelForAudioFrameClassification.from_pretrained(DIARIZER, { device: 'wasm', dtype: 'fp32', progress_callback: progress('speaker') }),
+    ]);
+    diarizer = { processor, model };
   }
-  post({ type: 'tag-progress', done: steps, total: steps });
-  return windows;
+  post({ type: 'status', text: 'Finding who is speaking…' });
+  const inputs = await diarizer.processor(samples);
+  const { logits } = await diarizer.model(inputs);
+  return diarizer.processor.post_process_speaker_diarization(logits, samples.length)[0];
 }
 
 self.onmessage = async ({ data }) => {
   const { id, type } = data;
   try {
     if (type === 'transcribe') post({ id, type: 'result', chunks: await transcribe(data) });
-    else if (type === 'tag') post({ id, type: 'result', windows: await tagSounds(data) });
+    else if (type === 'diarize') post({ id, type: 'result', segments: await diarize(data) });
   } catch (e) {
     post({ id, type: 'error', message: e?.message || String(e) });
   }

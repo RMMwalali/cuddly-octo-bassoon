@@ -1,5 +1,6 @@
-// The reaction strip: one block per word under the video. Block height shows
-// emphasis level, color shows the page's mood. Click to seek or pick a word.
+// The intention strip: one block per word under the video. Block height shows
+// size (volume), opacity shows weight (pitch), color shows the speaker, and a
+// dot marks emphasis. Click to seek or pick a word.
 
 const CSS = getComputedStyle(document.documentElement);
 const v = (name) => CSS.getPropertyValue(name).trim();
@@ -21,7 +22,7 @@ export class Strip {
     this.selected = null;
     this.onSeek = onSeek;
     this.onPick = onPick;
-    this.colors = { neutral: v('--neutral'), excited: v('--excited'), angry: v('--angry'), soft: v('--soft'), question: v('--question'), signal: v('--signal'), line: v('--line'), muted: v('--muted') };
+    this.colors = { signal: v('--signal'), line: v('--line'), muted: v('--muted'), text: v('--text') };
     wrap.addEventListener('scroll', () => this.draw());
     new ResizeObserver(() => this.resize()).observe(wrap);
     wrap.addEventListener('click', (e) => this.click(e));
@@ -102,22 +103,28 @@ export class Strip {
     const p = this.project;
     if (p) {
       const byId = new Map(p.words.map((w) => [w.id, w]));
-      for (const page of p.pages) {
-        if (page.end < t0 || page.start > t1) continue;
-        const color = this.colors[page.mood] || this.colors.neutral;
-        for (const id of page.wordIds) {
+      const colors = new Map(p.cast.map((c) => [c.id, c.color]));
+      for (const cap of p.captions) {
+        if (cap.end < t0 || cap.start > t1) continue;
+        const color = colors.get(cap.speaker) || this.colors.text;
+        for (const id of cap.wordIds) {
           const w = byId.get(id);
           if (!w) continue;
           const x = w.start * pps - left;
           const bw = Math.max(2, (w.end - w.start) * pps - 1.5);
-          const h = 10 + w.level * 14;
-          ctx.globalAlpha = w.level >= 2 ? 1 : 0.55 + w.level * 0.15;
+          const h = 8 + ((w.size - 0.7) / 0.8) * (H - 30);
+          ctx.globalAlpha = 0.35 + 0.65 * ((w.weight - 100) / 800);
           ctx.fillStyle = color;
           ctx.beginPath();
           ctx.roundRect ? ctx.roundRect(x, base - h, bw, h, 2) : ctx.rect(x, base - h, bw, h);
           ctx.fill();
+          ctx.globalAlpha = 1;
+          if (w.emphasis) {
+            ctx.beginPath();
+            ctx.arc(x + bw / 2, base - h - 5, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+          }
           if (w.id === this.selected) {
-            ctx.globalAlpha = 1;
             ctx.strokeStyle = this.colors.signal;
             ctx.lineWidth = 2;
             ctx.strokeRect(x - 1, base - h - 1, bw + 2, h + 2);
@@ -125,12 +132,6 @@ export class Strip {
         }
       }
       ctx.globalAlpha = 1;
-      for (const s of p.sounds || []) {
-        if (s.end < t0 || s.start > t1) continue;
-        const x = s.start * pps - left;
-        ctx.fillStyle = 'rgba(255,210,63,0.22)';
-        ctx.fillRect(x, 14, Math.max(4, (s.end - s.start) * pps), 8);
-      }
     }
 
     const px = this.t * pps - left;

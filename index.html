@@ -4,12 +4,12 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Reactive Captions</title>
-  <meta name="description" content="Automatic captions that react to how things are said. Runs in your browser; your video never leaves your device." />
+  <meta name="description" content="Automatic Caption with Intention captions: speaker colors, word-by-word timing, and type that follows pitch and volume. Runs in your browser." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Montserrat:wght@900&family=Anton&family=Poppins:wght@800&family=Inter:wght@600;800&display=swap" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Roboto+Flex:opsz,wght@8..144,100..1000&display=swap" />
   <link rel="stylesheet" href="src/styles.css" />
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2317161F'/%3E%3Crect x='6' y='17' width='4' height='7' rx='1' fill='%23ECEAF2'/%3E%3Crect x='12' y='9' width='4' height='15' rx='1' fill='%23FFD23F'/%3E%3Crect x='18' y='14' width='4' height='10' rx='1' fill='%23ECEAF2'/%3E%3Crect x='24' y='19' width='3' height='5' rx='1' fill='%23ECEAF2'/%3E%3C/svg%3E" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2317161F'/%3E%3Crect x='6' y='17' width='4' height='7' rx='1' fill='%23ECEAF2'/%3E%3Crect x='12' y='9' width='4' height='15' rx='1' fill='%236B8AFF'/%3E%3Crect x='18' y='14' width='4' height='10' rx='1' fill='%23FF6B6B'/%3E%3Crect x='24' y='19' width='3' height='5' rx='1' fill='%23ECEAF2'/%3E%3C/svg%3E" />
 </head>
 <body>
   <header class="bar">
@@ -20,10 +20,11 @@
       <div class="menu" id="exportMenu">
         <button class="btn primary" id="exportBtn" aria-haspopup="true" aria-expanded="false" disabled>Export</button>
         <div class="menu-list" role="menu" hidden>
-          <button role="menuitem" data-export="video">Video with captions<small>Burned in, plays in real time</small></button>
-          <button role="menuitem" data-export="ass">Styled subtitles (.ass)<small>Keeps sizes and colors. Opens in VLC, mpv, Aegisub, ffmpeg</small></button>
-          <button role="menuitem" data-export="srt">Plain subtitles (.srt)<small>YouTube, TikTok, Instagram upload</small></button>
-          <button role="menuitem" data-export="vtt">Web subtitles (.vtt)<small>Word timing, bold emphasis</small></button>
+          <button role="menuitem" data-export="video">Video with captions<small>Burned in. Plays once in real time.</small></button>
+          <button role="menuitem" data-export="cwi">CWI file (.cwi.json)<small>Every word's weight, size and speaker. Works with OpenCaptions.</small></button>
+          <button role="menuitem" data-export="ass">Animated subtitles (.ass)<small>Keeps the color sync, weights and sizes. VLC, mpv, Aegisub, ffmpeg.</small></button>
+          <button role="menuitem" data-export="vtt">Web subtitles (.vtt)<small>Speaker names and word timing.</small></button>
+          <button role="menuitem" data-export="srt">Plain subtitles (.srt)<small>For uploading to YouTube, TikTok or Instagram.</small></button>
         </div>
       </div>
     </div>
@@ -33,14 +34,14 @@
     <section class="stage" id="stage">
       <div class="drop" id="drop">
         <div class="drop-inner">
-          <h2>Drop a video to caption it</h2>
-          <p>Speech is transcribed on this device, then captions grow, shake and change color with how each word is said.</p>
+          <h2>Captions that sound like the people speaking</h2>
+          <p>Drop a video. Each speaker gets a color, every word lights up as it's said, and the type gets bolder for lower voices, thinner for higher ones, and bigger when it's loud.</p>
           <label class="btn primary big">
             Choose video
             <input type="file" id="fileInput" accept="video/*,audio/*" hidden />
           </label>
           <details class="drop-options">
-            <summary>Transcription options</summary>
+            <summary>Options</summary>
             <div class="opt-grid">
               <label>Language
                 <select id="language">
@@ -55,6 +56,12 @@
                   <option value="german">German</option>
                 </select>
               </label>
+              <label>Speakers
+                <select id="speakerMode">
+                  <option value="auto">Detect who is speaking</option>
+                  <option value="one">Just one person</option>
+                </select>
+              </label>
               <label>Accuracy
                 <select id="model">
                   <option value="onnx-community/whisper-tiny_timestamped">Fast, small download</option>
@@ -62,14 +69,13 @@
                   <option value="onnx-community/whisper-small_timestamped">Best, larger download</option>
                 </select>
               </label>
-              <label class="check"><input type="checkbox" id="detectSounds" /> Detect laughs, applause and other sounds <small>(extra one-time download)</small></label>
-              <label class="check srt">Already have subtitles?
-                <span class="btn ghost small">Use .srt / .vtt instead<input type="file" id="subsInput" accept=".srt,.vtt,text/vtt" hidden /></span>
+              <div class="check">Already have captions?
+                <label class="btn ghost small">Use a .srt, .vtt or .cwi.json<input type="file" id="subsInput" accept=".srt,.vtt,.json,text/vtt,application/json" hidden /></label>
                 <small id="subsName"></small>
-              </label>
+              </div>
             </div>
           </details>
-          <p class="privacy">Nothing is uploaded. The speech model downloads once and is cached by your browser.</p>
+          <p class="privacy">Nothing is uploaded. The speech and speaker models download once and are cached by your browser.</p>
         </div>
       </div>
 
@@ -91,7 +97,7 @@
             <svg viewBox="0 0 24 24" class="i-pause"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
           </button>
           <span class="time" id="timeLabel">0:00 / 0:00</span>
-          <div class="strip-wrap" id="stripWrap" title="Each block is a word: height shows how strongly it was said, color shows the mood">
+          <div class="strip-wrap" id="stripWrap" title="Each block is a word. Color is the speaker, height is loudness, darker blocks are lower-pitched, and a dot marks emphasis.">
             <canvas id="strip"></canvas>
           </div>
         </div>
@@ -101,52 +107,73 @@
     <aside class="panel" id="panel">
       <nav class="tabs" role="tablist">
         <button role="tab" aria-selected="true" data-tab="style">Style</button>
-        <button role="tab" aria-selected="false" data-tab="react">Reactions</button>
+        <button role="tab" aria-selected="false" data-tab="speakers">Speakers</button>
         <button role="tab" aria-selected="false" data-tab="words">Words</button>
+        <button role="tab" aria-selected="false" data-tab="check">Check <span class="badge" id="checkBadge" hidden></span></button>
       </nav>
 
       <div class="tab" data-pane="style">
-        <h3>Look</h3>
-        <div class="presets" id="presets"></div>
+        <div class="key" aria-label="How to read these captions">
+          <p><span class="k-white">Words</span> <span class="k-spoken">light up</span> in the speaker's color as they're said</p>
+          <p><span class="k-bold">Bold</span> is a lower voice, <span class="k-thin">thin</span> is a higher one</p>
+          <p><span class="k-big">Big</span> is louder, <span class="k-small">small</span> is quieter, and emphasized words bounce</p>
+        </div>
         <h3>Position</h3>
         <div class="seg" id="position">
           <button data-v="top">Top</button><button data-v="middle">Middle</button><button data-v="bottom">Bottom</button>
         </div>
         <h3>Words on screen</h3>
         <div class="seg" id="layout">
-          <button data-v="short">Few words</button><button data-v="long">Full lines</button>
+          <button data-v="short">A few at a time</button><button data-v="long">Full lines</button>
         </div>
+        <h3>Text size</h3>
+        <div class="seg" id="textSize">
+          <button data-v="small">Small</button><button data-v="medium">Medium</button><button data-v="large">Large</button>
+        </div>
+        <h3>Background</h3>
+        <div class="seg" id="backing">
+          <button data-v="outline">Outline</button><button data-v="box">Dark box</button>
+        </div>
+        <label class="toggle"><input type="checkbox" id="names" /><span><b>Show speaker names</b> Adds the name above each caption.</span></label>
+        <h3>Intonation strength</h3>
+        <div class="range">
+          <span>Subtle</span><input type="range" id="sensitivity" min="0.4" max="1.6" step="0.05" aria-label="Intonation strength" /><span>Strong</span>
+        </div>
+        <p class="help" id="stats"></p>
       </div>
 
-      <div class="tab" data-pane="react" hidden>
-        <p class="help">Choose what the captions respond to.</p>
-        <label class="toggle"><input type="checkbox" data-react="size" /><span><b>Size</b> Louder, stressed words grow. Shouts go all caps.</span></label>
-        <label class="toggle"><input type="checkbox" data-react="color" /><span><b>Color</b> Emphasized words take the mood's color.</span></label>
-        <label class="toggle"><input type="checkbox" data-react="motion" /><span><b>Motion</b> Shouts shake, excited lines bounce.</span></label>
-        <label class="toggle"><input type="checkbox" data-react="sounds" /><span><b>Sound tags</b> Show [laughs], [applause] and similar.</span></label>
-        <h3>Sensitivity</h3>
-        <div class="range">
-          <span>Calm</span><input type="range" id="sensitivity" min="0.5" max="1.6" step="0.05" /><span>Wild</span>
-        </div>
-        <p class="help" id="reactStats"></p>
-        <h3>Moods</h3>
-        <ul class="legend" id="legend"></ul>
-        <button class="btn ghost small" id="tagSoundsBtn" hidden>Detect sounds now</button>
+      <div class="tab" data-pane="speakers" hidden>
+        <p class="help">Rename speakers and pick their colors. To move lines to someone else, change the speaker on a caption in Words.</p>
+        <ul class="cast" id="cast"></ul>
       </div>
 
       <div class="tab" data-pane="words" hidden>
         <div class="inspector" id="inspector" hidden>
           <input type="text" id="wordText" aria-label="Word text" />
-          <div class="seg levels" id="wordLevel">
-            <button data-v="0">Normal</button><button data-v="1">Stressed</button><button data-v="2">Strong</button><button data-v="3">Shout</button>
-          </div>
+          <label class="slider">
+            <span>Weight <output id="weightOut"></output></span>
+            <input type="range" id="wordWeight" min="100" max="900" step="50" />
+            <span class="ends"><small>Thin, higher voice</small><small>Bold, lower voice</small></span>
+          </label>
+          <label class="slider">
+            <span>Size <output id="sizeOut"></output></span>
+            <input type="range" id="wordSize" min="0.7" max="1.5" step="0.05" />
+            <span class="ends"><small>Quiet</small><small>Loud</small></span>
+          </label>
+          <label class="toggle compact"><input type="checkbox" id="wordEmphasis" /><span><b>Emphasis</b> Bounces as it's spoken.</span></label>
           <div class="inspector-row">
             <button class="btn ghost small" id="wordAuto">Back to automatic</button>
             <button class="btn ghost small danger" id="wordDelete">Delete word</button>
           </div>
         </div>
-        <p class="help" id="wordsHelp">Click a word to jump there and change it.</p>
-        <ol class="pages" id="pages"></ol>
+        <p class="help" id="wordsHelp">Click a word to jump there and adjust it.</p>
+        <ol class="caps" id="caps"></ol>
+      </div>
+
+      <div class="tab" data-pane="check" hidden>
+        <p class="help">Checks the captions against the Caption with Intention rules used by OpenCaptions.</p>
+        <div class="score" id="score"></div>
+        <ul class="rules" id="rules"></ul>
       </div>
     </aside>
   </main>

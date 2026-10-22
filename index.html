@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#17161f" />
   <title>Reactive Captions</title>
   <meta name="description" content="Automatic Caption with Intention captions: speaker colors, word-by-word timing, and type that follows pitch and volume. Runs in your browser." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -13,7 +14,7 @@
 </head>
 <body>
   <header class="bar">
-    <h1 class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Reactive Captions</h1>
+    <h1 class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span class="brand-text">Reactive Captions</span></h1>
     <p class="file" id="fileName" hidden></p>
     <div class="bar-actions">
       <button class="btn ghost" id="newBtn" hidden>New video</button>
@@ -64,9 +65,9 @@
               </label>
               <label>Accuracy
                 <select id="model">
-                  <option value="onnx-community/whisper-tiny_timestamped">Fast, small download</option>
-                  <option value="onnx-community/whisper-base_timestamped" selected>Balanced</option>
-                  <option value="onnx-community/whisper-small_timestamped">Best, larger download</option>
+                  <option value="onnx-community/whisper-tiny_timestamped">Fast (about 40 MB download)</option>
+                  <option value="onnx-community/whisper-base_timestamped" selected>Balanced (about 80 MB)</option>
+                  <option value="onnx-community/whisper-small_timestamped">Best (about 250 MB, computers only)</option>
                 </select>
               </label>
               <div class="check">Already have captions?
@@ -89,6 +90,7 @@
             <p id="workText">Preparing…</p>
             <div class="meter"><div id="workBar"></div></div>
             <small id="workDetail"></small>
+            <div class="work-actions" id="workActions" hidden></div>
           </div>
         </div>
         <div class="transport">
@@ -101,6 +103,7 @@
             <canvas id="strip"></canvas>
           </div>
         </div>
+        <p class="strip-key">Each block is a word: color is the speaker, taller is louder, a dot means emphasis. Tap one to edit it.</p>
       </div>
     </section>
 
@@ -169,6 +172,7 @@
           <div class="inspector-row">
             <button class="btn ghost small" id="wordAuto">Back to automatic</button>
             <button class="btn ghost small danger" id="wordDelete">Delete word</button>
+            <button class="btn small primary" id="wordDone">Done</button>
           </div>
         </div>
         <p class="help" id="wordsHelp">Click a word to jump there and adjust it.</p>

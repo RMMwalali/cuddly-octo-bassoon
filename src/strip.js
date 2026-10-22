@@ -24,6 +24,9 @@ export class Strip {
     this.onPick = onPick;
     this.colors = { signal: v('--signal'), line: v('--line'), muted: v('--muted'), text: v('--text') };
     wrap.addEventListener('scroll', () => this.draw());
+    // Don't fight someone swiping the timeline: pause auto-follow for a moment.
+    this.userAt = 0;
+    for (const ev of ['pointerdown', 'touchstart', 'wheel']) wrap.addEventListener(ev, () => (this.userAt = performance.now()), { passive: true });
     new ResizeObserver(() => this.resize()).observe(wrap);
     wrap.addEventListener('click', (e) => this.click(e));
   }
@@ -50,7 +53,7 @@ export class Strip {
 
   setTime(t, follow) {
     this.t = t;
-    if (follow) {
+    if (follow && performance.now() - this.userAt > 2500) {
       const x = t * this.pps, left = this.wrap.scrollLeft, w = this.wrap.clientWidth;
       if (x < left + 20 || x > left + w - 60) this.wrap.scrollLeft = Math.max(0, x - w * 0.3);
     }

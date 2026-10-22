@@ -190,3 +190,22 @@ test('fonts map CWI weights into each typeface and keep regular at regular', asy
   const { p } = project();
   assert.match(toASS(p, { font: 'oswald' }), /Style: CWI,Oswald,[\s\S]*\\b700/);
 });
+
+test('windowed speaker labels are stitched into consistent speakers', async () => {
+  const { stitchDiarization, POWERSET_TO_SPEAKER } = await import('../src/cwi.js');
+  assert.deepEqual(POWERSET_TO_SPEAKER, [0, 1, 2, 3, 1, 1, 2]);
+  // Truth: A for 0-12 s, B for 12-20 s. frameDur 0.5 s, windows of 10 s every 5 s.
+  // The model's local labels flip between windows (A is "2" in window 2).
+  const who = (t) => (t < 12 ? 'A' : 'B');
+  const labels = [{ A: 1, B: 2 }, { A: 2, B: 1 }, { A: 3, B: 1 }];
+  const windows = [0, 5, 10].map((start, k) => ({
+    start, frameDur: 0.5,
+    frames: Int8Array.from({ length: 20 }, (_, i) => labels[k][who(start + i * 0.5 + 0.25)]),
+  }));
+  const segs = stitchDiarization(windows);
+  assert.deepEqual(segs.map((s) => [s.id, s.start, s.end]), [[1, -Infinity, 12], [2, 12, Infinity]].map(([id, a, b]) => [id, a === -Infinity ? segs[0].start : a, b === Infinity ? segs.at(-1).end : b]));
+  assert.equal(segs.length, 2);
+  assert.equal(segs[0].id, 1);
+  assert.equal(segs[1].id, 2);
+  assert.equal(segs[0].end, 12);
+});

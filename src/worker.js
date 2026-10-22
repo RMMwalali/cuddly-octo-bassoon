@@ -1,6 +1,10 @@
 // Runs the AI models off the main thread: Whisper for word-timed transcripts and
 // pyannote segmentation for who is speaking when. Models download once from the
 // Hugging Face Hub and are cached by the browser; audio never leaves the device.
+//
+// Everything runs on WebAssembly with 8-bit weights. That is the smallest
+// download (about 40 MB for Fast, 77 MB for Balanced) and works the same on
+// every phone and desktop browser; the GPU builds are 2–3x bigger to download.
 
 import {
   pipeline, env, AutoProcessor, AutoModelForAudioFrameClassification,
@@ -9,7 +13,8 @@ import {
 env.allowLocalModels = false;
 
 const SR = 16000;
-const pipes = new Map();
+let asr = null;
+let asrModel = null;
 const post = (msg) => self.postMessage(msg);
 
 function progress(kind) {
@@ -20,38 +25,12 @@ function progress(kind) {
   };
 }
 
-async function hasWebGPU() {
-  try {
-    return !!(self.navigator?.gpu && (await self.navigator.gpu.requestAdapter()));
-  } catch {
-    return false;
-  }
-}
-
-async function load(task, model, kind) {
-  const key = `${task}:${model}`;
-  if (pipes.has(key)) return pipes.get(key);
-  const gpu = await hasWebGPU();
-  const tries = gpu
-    ? [
-        { device: 'webgpu', dtype: task === 'automatic-speech-recognition' ? { encoder_model: 'fp32', decoder_model_merged: 'q4' } : 'fp32' },
-        { device: 'wasm', dtype: 'q8' },
-      ]
-    : [{ device: 'wasm', dtype: 'q8' }];
-  let lastErr;
-  for (const opts of tries) {
-    try {
-      post({ type: 'status', text: `Loading ${kind} model (${opts.device === 'webgpu' ? 'GPU' : 'CPU'})…` });
-      const p = await pipeline(task, model, { ...opts, progress_callback: progress(kind) });
-      pipes.set(key, p);
-      post({ type: 'device', kind, device: opts.device });
-      return p;
-    } catch (e) {
-      lastErr = e;
-      console.warn(`[worker] ${model} on ${opts.device} failed`, e);
-    }
-  }
-  throw lastErr;
+async function loadASR(model) {
+  if (asr && asrModel === model) return asr;
+  post({ type: 'status', text: 'Loading speech model…' });
+  asr = await pipeline('automatic-speech-recognition', model, { device: 'wasm', dtype: 'q8', progress_callback: progress('speech') });
+  asrModel = model;
+  return asr;
 }
 
 const rms = (a) => {
@@ -79,7 +58,7 @@ function cutPoints(samples) {
 }
 
 async function transcribe({ samples, model, language }) {
-  const asr = await load('automatic-speech-recognition', model, 'speech');
+  const run = await loadASR(model);
   const cuts = cutPoints(samples);
   const words = [];
   const total = cuts.length - 1;
@@ -95,7 +74,7 @@ async function transcribe({ samples, model, language }) {
       opts.task = 'transcribe';
       if (language && language !== 'auto') opts.language = language;
     }
-    const out = await asr(piece, opts);
+    const out = await run(piece, opts);
     for (const c of out.chunks || []) {
       const [s, e] = c.timestamp || [];
       words.push({
@@ -110,11 +89,13 @@ async function transcribe({ samples, model, language }) {
 }
 
 const DIARIZER = 'onnx-community/pyannote-segmentation-3.0';
+const POWERSET_TO_SPEAKER = [0, 1, 2, 3, 1, 1, 2];
 let diarizer = null;
 
 /**
- * Speaker segments for the whole clip: [{ id, start, end, confidence }].
- * The model is small (~6 MB) and runs on the CPU.
+ * Per-window speaker labels, in 10 s windows every 5 s (what the model was
+ * trained on, and flat memory however long the video is). The main thread
+ * stitches the windows into one timeline (stitchDiarization in cwi.js).
  */
 async function diarize({ samples }) {
   if (!diarizer) {
@@ -125,17 +106,39 @@ async function diarize({ samples }) {
     ]);
     diarizer = { processor, model };
   }
-  post({ type: 'status', text: 'Finding who is speaking…' });
-  const inputs = await diarizer.processor(samples);
-  const { logits } = await diarizer.model(inputs);
-  return diarizer.processor.post_process_speaker_diarization(logits, samples.length)[0];
+  const win = 10 * SR, hop = 5 * SR;
+  const starts = [];
+  for (let s = 0; ; s += hop) {
+    starts.push(s);
+    if (s + win >= samples.length) break;
+  }
+  const windows = [];
+  for (let k = 0; k < starts.length; k++) {
+    post({ type: 'status', text: 'Finding who is speaking…' });
+    post({ type: 'diarize-progress', done: k, total: starts.length });
+    const piece = samples.subarray(starts[k], Math.min(samples.length, starts[k] + win));
+    if (piece.length < SR * 0.5) break;
+    const inputs = await diarizer.processor(piece);
+    const { logits } = await diarizer.model(inputs);
+    const [, F, C] = logits.dims;
+    const data = logits.data;
+    const frames = new Int8Array(F);
+    for (let f = 0; f < F; f++) {
+      let best = 0, bv = -Infinity;
+      for (let c = 0; c < C; c++) { const v = data[f * C + c]; if (v > bv) { bv = v; best = c; } }
+      frames[f] = POWERSET_TO_SPEAKER[best] ?? 0;
+    }
+    windows.push({ start: starts[k] / SR, frameDur: piece.length / SR / F, frames });
+  }
+  post({ type: 'diarize-progress', done: starts.length, total: starts.length });
+  return windows;
 }
 
 self.onmessage = async ({ data }) => {
   const { id, type } = data;
   try {
     if (type === 'transcribe') post({ id, type: 'result', chunks: await transcribe(data) });
-    else if (type === 'diarize') post({ id, type: 'result', segments: await diarize(data) });
+    else if (type === 'diarize') post({ id, type: 'result', windows: await diarize(data) });
   } catch (e) {
     post({ id, type: 'error', message: e?.message || String(e) });
   }

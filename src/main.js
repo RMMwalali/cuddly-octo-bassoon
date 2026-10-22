@@ -1,11 +1,13 @@
-import { decodeToMono16k, wordFeatures, envelope } from './audio.js';
+import { wordFeatures, wordFeaturesAsync, envelope } from './audio.js';
+import { decodeFile, captureByPlayback, unlockAudio, audioContext } from './audio-decode.js';
 import {
-  wordsFromWhisper, parseCues, wordsFromCues, assignSpeakers, analyze, fromCWIDocument, SPEAKER_COLORS, CWI,
+  wordsFromWhisper, parseCues, wordsFromCues, assignSpeakers, analyze, fromCWIDocument, SPEAKER_COLORS, CWI, stitchDiarization,
 } from './cwi.js';
 import { drawCaptions, DEFAULT_SETTINGS, MOTIONS } from './renderer.js';
 import { FONTS, getFont, ensureFont, cssUrl, familyStack } from './fonts.js';
 import { validate, contrastRatio, RULE_LIST } from './validate.js';
-import { toSRT, toVTT, toASS, toCWIJSON, download, burnIn } from './export.js';
+import { toSRT, toVTT, toASS, toCWIJSON, download, burnIn, primeVideo, saveVideo, isPhone } from './export.js';
+import { clear3DCache } from './gl3d.js';
 import { toCWIDocument } from './cwi.js';
 import { Strip } from './strip.js';
 
@@ -24,6 +26,7 @@ const state = {
   language: null,
   source: 'browser-whisper+pyannote', // what produced the words, for the CWI metadata
   busy: false,
+  abort: null, // AbortController for the running analysis
 };
 
 function loadSettings() {
@@ -41,10 +44,30 @@ function saveSettings() {
 let worker = null;
 let reqId = 0;
 const pending = new Map();
+// Watchdog: a stalled download or a worker the OS killed for memory sends
+// nothing, so without this the app would wait forever.
+let lastBeat = 0;
+let phase = 'run';
+function killWorker(err) {
+  if (worker) { worker.terminate(); worker = null; }
+  for (const { reject } of pending.values()) reject(err);
+  pending.clear();
+}
+setInterval(() => {
+  if (!pending.size || document.hidden) return;
+  const limit = phase === 'download' ? 45000 : 240000;
+  if (performance.now() - lastBeat > limit) {
+    killWorker(new Error(phase === 'download'
+      ? 'The model download stopped. Check your connection and try again.'
+      : 'Processing stopped responding. Try the Fast accuracy option or a shorter clip.'));
+  }
+}, 3000);
 function getWorker() {
   if (worker) return worker;
   worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
   worker.onmessage = ({ data }) => {
+    lastBeat = performance.now();
+    phase = data.type === 'download' && data.status !== 'done' ? 'download' : 'run';
     if (data.id && pending.has(data.id)) {
       const { resolve, reject } = pending.get(data.id);
       pending.delete(data.id);
@@ -54,19 +77,36 @@ function getWorker() {
     onWorkerEvent(data);
   };
   worker.onerror = (e) => {
-    for (const { reject } of pending.values()) reject(new Error(e.message || 'The models could not start in this browser.'));
-    pending.clear();
-    worker = null;
+    e.preventDefault?.();
+    killWorker(new Error(e.message || 'The models could not start in this browser.'));
   };
   return worker;
 }
 function ask(msg, transfer) {
   const id = ++reqId;
+  lastBeat = performance.now();
+  phase = 'run';
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
     getWorker().postMessage({ ...msg, id }, transfer || []);
   });
 }
+
+// ------------------------------------------------------------------ keep the phone awake
+let wakeLock = null;
+async function keepAwake() {
+  try { if (!wakeLock && navigator.wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener?.('release', () => (wakeLock = null)); } } catch {}
+}
+function allowSleep() {
+  try { wakeLock?.release(); } catch {}
+  wakeLock = null;
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && state.busy) {
+    keepAwake();
+    toast('Keep this screen open while it works. Phones pause apps in the background.', false, 6000);
+  }
+});
 
 const downloads = new Map();
 function onWorkerEvent(d) {
@@ -77,6 +117,7 @@ function onWorkerEvent(d) {
     for (const f of downloads.values()) { loaded += f.loaded; total += f.total; }
     if (total > 0) work(null, loaded / total, `Downloading the ${d.kind} model, ${mb(loaded)} of ${mb(total)}. This happens once.`);
   } else if (d.type === 'transcribe-progress') work(null, d.total ? d.done / d.total : null, '');
+  else if (d.type === 'diarize-progress') work(null, d.total ? d.done / d.total : null, '');
   else if (d.type === 'partial') {
     // Show words as they arrive so people see it working.
     state.project = analyze({ words: wordsFromWhisper(d.chunks), cast: [] }, state.settings);
@@ -102,7 +143,19 @@ function work(text, frac, detail) {
   else if (frac !== undefined) { bar.classList.remove('indeterminate'); $('#workBar').style.width = `${Math.round(frac * 100)}%`; }
   if (detail !== undefined) $('#workDetail').textContent = detail;
 }
-const workDone = () => { $('#work').hidden = true; };
+function workButtons(buttons = []) {
+  const row = $('#workActions');
+  row.innerHTML = '';
+  for (const { label, primary, onClick } of buttons) {
+    const b = document.createElement('button');
+    b.className = `btn small ${primary ? 'primary' : 'ghost'}`;
+    b.textContent = label;
+    b.onclick = onClick;
+    row.append(b);
+  }
+  row.hidden = !buttons.length;
+}
+const workDone = () => { $('#work').hidden = true; workButtons(); };
 
 let toastTimer;
 function toast(msg, error = false, ms = 4500) {
@@ -115,11 +168,43 @@ function toast(msg, error = false, ms = 4500) {
 }
 
 // ------------------------------------------------------------------ load + analyze
+function waitForMetadata(el, ms = 10000) {
+  if (el.readyState >= 1) return Promise.resolve();
+  return new Promise((res) => {
+    const t = setTimeout(res, ms); // audio-only or slow files: carry on without it
+    el.onloadedmetadata = () => { clearTimeout(t); res(); };
+    el.onerror = () => { clearTimeout(t); res(); };
+  });
+}
+
+/** The fallback needs one tap from the person (browsers only play sound after a tap). */
+function listenWithTap(signal) {
+  return new Promise((resolve, reject) => {
+    const mins = Math.max(1, Math.round((video.duration || 60) / 60));
+    work('One more step for this file', 0, `Your browser can't read this file's audio directly, so the app will listen to it while it plays once (about ${mins} min, sound muted). Keep this screen open.`);
+    const onAbort = () => reject(new DOMException('Cancelled', 'AbortError'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    workButtons([
+      { label: 'Start listening', primary: true, onClick: () => {
+        unlockAudio();
+        workButtons([{ label: 'Cancel', onClick: () => state.abort?.abort() }]);
+        work('Listening to your video…', 0, 'Keep this screen open.');
+        captureByPlayback(video, { signal, onProgress: (f) => work(null, f) }).then(resolve, reject);
+      } },
+      { label: 'Cancel', onClick: () => state.abort?.abort() },
+    ]);
+  });
+}
+
 async function openFile(file) {
   if (!file) return;
   if (/\.(srt|vtt|json)$/i.test(file.name)) return setSubs(file);
   if (state.busy) return;
   state.busy = true;
+  const ctrl = new AbortController();
+  state.abort = ctrl;
+  ctrl.signal.addEventListener('abort', () => killWorker(new DOMException('Cancelled', 'AbortError')));
+  keepAwake();
   state.file = file;
   if (state.url) URL.revokeObjectURL(state.url);
   state.url = URL.createObjectURL(file);
@@ -127,16 +212,30 @@ async function openFile(file) {
   state.selected = null;
   $('#drop').hidden = true;
   $('#player').hidden = false;
+  document.body.classList.add('has-video');
   $('#newBtn').hidden = false;
   $('#fileName').hidden = false;
   $('#fileName').textContent = file.name;
   $('#exportBtn').disabled = true;
-  video.src = state.url;
-  await new Promise((res) => { video.onloadedmetadata = res; video.onerror = res; });
-  sizeOverlay();
   try {
+    work('Opening video…', null, '');
+    workButtons([{ label: 'Cancel', onClick: () => ctrl.abort() }]);
+    video.src = state.url;
+    await waitForMetadata(video);
+    sizeOverlay();
+    if (isPhone() && file.size > 500 * 1048576) {
+      toast('This is a big file for a phone. If the app closes, trim the clip first or use a computer.', false, 8000);
+    }
     work('Reading audio…', null, '');
-    state.audio = await decodeToMono16k(file);
+    try {
+      state.audio = await decodeFile(file);
+    } catch (e) {
+      if (/memory|allocation|Array buffer/i.test(e?.message || '')) throw e;
+      console.warn('decodeAudioData failed, falling back to playback capture', e);
+      state.audio = await listenWithTap(ctrl.signal);
+      workButtons([{ label: 'Cancel', onClick: () => ctrl.abort() }]);
+    }
+    if (ctrl.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
     strip.set(null, state.audio.duration, envelope(state.audio.samples, state.audio.sampleRate));
 
     if (state.subs?.kind === 'cwi') {
@@ -167,15 +266,15 @@ async function openFile(file) {
           downloads.clear();
           const samples = state.audio.samples.slice();
           const res = await ask({ type: 'diarize', samples }, [samples.buffer]);
-          assignSpeakers(words, res.segments);
+          assignSpeakers(words, stitchDiarization(res.windows), { powerset: false });
         } catch (e) {
+          if (e?.name === 'AbortError') throw e;
           console.error(e);
           toast(`Speaker detection didn't work (${friendlyError(e)}). Everyone is one speaker for now; you can reassign lines in Words.`, true, 9000);
         }
       }
-      work('Measuring pitch and volume…', null, '');
-      await new Promise((r) => setTimeout(r, 30));
-      const feats = wordFeatures(words, state.audio.samples, state.audio.sampleRate);
+      work('Measuring pitch and volume…', 0, '');
+      const feats = await wordFeaturesAsync(words, state.audio.samples, state.audio.sampleRate, (f) => work(null, f));
       words.forEach((w, i) => (w.f = feats[i]));
       state.project = analyze({ words, cast: [] }, state.settings);
     }
@@ -184,12 +283,20 @@ async function openFile(file) {
     refresh();
     if (state.project.cast.length > 1) toast(`Found ${state.project.cast.length} speakers. Rename them in Speakers.`);
   } catch (e) {
-    console.error(e);
     workDone();
-    toast(friendlyError(e), true, 9000);
-    if (state.project?.words.length) $('#exportBtn').disabled = false;
+    if (e?.name === 'AbortError') {
+      resetToStart();
+    } else {
+      console.error(e);
+      toast(friendlyError(e), true, 9000);
+      if (state.project?.words.length) $('#exportBtn').disabled = false;
+    }
   } finally {
     state.busy = false;
+    state.abort = null;
+    allowSleep();
+    // Phones: free the models' memory for editing and export (they reload from cache).
+    if (isPhone() && worker && !pending.size) { worker.terminate(); worker = null; }
   }
 }
 
@@ -197,7 +304,7 @@ function friendlyError(e) {
   const m = e?.message || String(e);
   if (/decode|EncodingError|Unable to decode/i.test(m)) return 'This browser cannot read the audio in that file. Try an MP4 or WebM, or convert it first.';
   if (/fetch|network|Failed to load|NetworkError/i.test(m)) return 'A model could not be downloaded. Check your connection and try again.';
-  if (/memory|allocation/i.test(m)) return 'Ran out of memory. Pick the Fast accuracy option or use a shorter clip.';
+  if (/memory|allocation|Array buffer/i.test(m)) return 'Ran out of memory. Pick the Fast accuracy option or use a shorter clip.';
   return m;
 }
 
@@ -231,13 +338,16 @@ function draw() {
       if (id) {
         const el = document.querySelector(`.cap[data-id="${id}"]`);
         el?.classList.add('now');
-        if (!video.paused && el && !$('[data-pane=words]').hidden) el.scrollIntoView({ block: 'nearest' });
+        if (!video.paused && el && !$('[data-pane=words]').hidden && !narrow.matches) el.scrollIntoView({ block: 'nearest' });
       }
     }
   }
   strip.setTime(t, !video.paused);
   $('#timeLabel').textContent = `${clock(t)} / ${clock(video.duration || 0)}`;
 }
+const narrow = matchMedia('(max-width: 860px)');
+// Phones: the pinned video's height, so the tabs can stick right under it.
+new ResizeObserver(([e]) => document.documentElement.style.setProperty('--stage-h', `${Math.round(e.target.getBoundingClientRect().height)}px`)).observe($('#stage'));
 const clock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
 function loop() {
@@ -388,6 +498,7 @@ $('#wordSize').addEventListener('input', (e) => {
 $('#wordSize').addEventListener('change', () => editWord(() => {}));
 $('#wordEmphasis').addEventListener('change', (e) => editWord((w) => (w.manual.emphasis = e.target.checked)));
 $('#wordAuto').addEventListener('click', () => editWord((w) => (w.manual = {})));
+$('#wordDone').addEventListener('click', () => selectWord(null));
 $('#wordDelete').addEventListener('click', () => {
   const w = selected();
   if (!w) return;
@@ -610,7 +721,7 @@ async function setSubs(file) {
       analyze(state.project, state.settings);
     } else {
       const words = wordsFromCues(parseCues(text));
-      const feats = wordFeatures(words, state.audio.samples, state.audio.sampleRate);
+      const feats = await wordFeaturesAsync(words, state.audio.samples, state.audio.sampleRate);
       words.forEach((w, i) => (w.f = feats[i]));
       state.project = analyze({ words, cast: [] }, state.settings);
     }
@@ -633,8 +744,7 @@ document.addEventListener('drop', async (e) => {
   if (media) openFile(media);
 });
 
-$('#newBtn').addEventListener('click', () => {
-  if (state.busy) return;
+function resetToStart() {
   video.pause();
   video.removeAttribute('src');
   video.load();
@@ -644,10 +754,19 @@ $('#newBtn').addEventListener('click', () => {
   $('#subsInput').value = '';
   $('#drop').hidden = false;
   $('#player').hidden = true;
+  document.body.classList.remove('has-video');
   $('#newBtn').hidden = true;
   $('#fileName').hidden = true;
   $('#exportBtn').disabled = true;
+  $('#inspector').hidden = true;
   refresh();
+}
+$('#newBtn').addEventListener('click', () => {
+  if (state.busy) {
+    if (state.abort) state.abort.abort(); // stops analysis and returns to the start
+    return;
+  }
+  resetToStart();
 });
 
 // ------------------------------------------------------------------ transport
@@ -668,7 +787,7 @@ $('#exportBtn').addEventListener('click', () => {
   $('#exportBtn').setAttribute('aria-expanded', String(open));
   if (open) menuList.querySelector('button').focus();
 });
-document.addEventListener('click', (e) => { if (!menu.contains(e.target)) { menuList.hidden = true; $('#exportBtn').setAttribute('aria-expanded', 'false'); } });
+document.addEventListener('pointerdown', (e) => { if (!menu.contains(e.target)) { menuList.hidden = true; $('#exportBtn').setAttribute('aria-expanded', 'false'); } });
 menuList.addEventListener('keydown', (e) => { if (e.key === 'Escape') { menuList.hidden = true; $('#exportBtn').focus(); } });
 
 const baseName = () => (state.file?.name || 'captions').replace(/\.[^.]+$/, '');
@@ -682,39 +801,53 @@ menuList.addEventListener('click', (e) => {
   if (kind === 'vtt') download(`${baseName()}.vtt`, toVTT(p), 'text/vtt');
   if (kind === 'cwi') download(`${baseName()}.cwi.json`, toCWIJSON(p, { title: baseName(), duration: state.audio?.duration || video.duration, language: state.language || 'und', backend: state.source }), 'application/json');
   if (kind === 'ass') download(`${baseName()}.ass`, toASS(p, { width: video.videoWidth || 1080, height: video.videoHeight || 1920, ...state.settings }), 'text/plain');
-  if (kind === 'video') exportVideo();
+  if (kind === 'video') {
+    // iOS: audio and unmuted playback must start inside this tap, before any await.
+    unlockAudio();
+    exportVideo(primeVideo(state.url));
+  }
 });
 
-async function exportVideo() {
+async function exportVideo(exportEl) {
   if (state.busy) return;
   if (!window.MediaRecorder || !HTMLCanvasElement.prototype.captureStream) {
-    toast('This browser cannot record video. Use Chrome or Edge, or export the .ass file and burn it in with ffmpeg.', true, 8000);
+    toast('This browser cannot record video. Update it, or export the .ass file and burn it in with ffmpeg on a computer.', true, 9000);
     return;
   }
   state.busy = true;
+  keepAwake();
   video.pause();
   const ctrl = new AbortController();
-  work('Rendering your video…', 0, 'Plays once in real time. Keep this tab open and visible.');
-  const cancel = document.createElement('button');
-  cancel.className = 'btn ghost small';
-  cancel.textContent = 'Cancel';
-  cancel.style.marginTop = '10px';
-  cancel.onclick = () => ctrl.abort();
-  $('#work').append(cancel);
+  const phone = isPhone();
+  work('Rendering your video…', 0, 'It plays once in real time. Keep this screen open and on this app.');
+  workButtons([{ label: 'Cancel', onClick: () => ctrl.abort() }]);
   try {
     await loadFonts();
     const p = state.project;
-    const { blob, ext } = await burnIn(state.url, (ctx, t) => drawCaptions(ctx, p, t, state.settings), {
+    const { blob, ext } = await burnIn(exportEl, audioContext(), (ctx, t) => drawCaptions(ctx, p, t, state.settings), {
       signal: ctrl.signal,
       onProgress: (f) => work(null, f),
+      maxSide: phone ? 1280 : 1920,
+      bitrate: phone ? 5_000_000 : 10_000_000,
     });
-    download(`${baseName()}-captioned.${ext}`, blob);
-    toast(ext === 'mp4' ? 'Video exported.' : 'Video exported as WebM. Most apps accept it; convert to MP4 if one does not.');
+    const name = `${baseName()}-captioned.${ext}`;
+    if (phone) {
+      // Sharing needs a fresh tap, so offer it as a button.
+      work('Your video is ready', 1, ext === 'mp4' ? `${mb(blob.size)}, MP4.` : `${mb(blob.size)}, WebM. If an app won't take it, convert it to MP4.`);
+      await new Promise((resolve) => workButtons([
+        { label: 'Save or share', primary: true, onClick: async () => { await saveVideo(name, blob); resolve(); } },
+        { label: 'Close', onClick: resolve },
+      ]));
+    } else {
+      download(name, blob);
+      toast(ext === 'mp4' ? 'Video exported.' : 'Video exported as WebM. Most apps accept it; convert to MP4 if one does not.');
+    }
   } catch (e) {
-    if (e.name !== 'AbortError') { console.error(e); toast(`Export failed: ${e.message}`, true, 8000); }
+    if (e.name !== 'AbortError') { console.error(e); toast(`Export failed: ${e.message}`, true, 9000); }
   } finally {
-    cancel.remove();
     workDone();
+    clear3DCache();
+    allowSleep();
     state.busy = false;
   }
 }
@@ -725,9 +858,13 @@ function loadFonts() {
 }
 buildPickers();
 syncSettings();
+// Phones: start with the smallest, fastest speech model (about 40 MB).
+if (isPhone()) $('#model').value = 'onnx-community/whisper-tiny_timestamped';
+// iOS only allows audio that starts in a tap, so unlock it on the first one.
+document.addEventListener('pointerdown', unlockAudio, { once: true, capture: true });
 loadFonts().then(draw);
 document.fonts?.ready.then(draw);
-window.addEventListener('beforeunload', (e) => { if (state.busy) e.preventDefault(); });
+window.addEventListener('beforeunload', (e) => { if (state.busy) { e.preventDefault(); e.returnValue = ''; } });
 
 // Test hook for the browser tests.
-window.__rc = { state, openFile, reanalyze, refresh };
+window.__rc = { state, openFile, reanalyze, refresh, killWorker };

@@ -105,7 +105,24 @@ export function download(name, data, type = 'text/plain') {
   document.body.appendChild(a);
   a.click();
   a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  // iOS asks "Download?" first and only reads the blob after the tap, so keep it alive.
+  setTimeout(() => URL.revokeObjectURL(a.href), 120000);
+}
+
+export const isPhone = () => matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 820;
+
+/**
+ * Save a finished video. On phones, the share sheet lets people "Save Video"
+ * straight to Photos/Gallery or post it; elsewhere it's a normal download.
+ * Must be called from a tap when using the share sheet.
+ */
+export async function saveVideo(name, blob) {
+  const file = new File([blob], name, { type: blob.type });
+  if (isPhone() && navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file] }); return 'shared'; } catch (e) { if (e.name === 'AbortError') return 'cancelled'; }
+  }
+  download(name, blob);
+  return 'downloaded';
 }
 
 export function pickRecorderType() {
@@ -121,58 +138,103 @@ export function pickRecorderType() {
 }
 
 /**
+ * Create the export's <video> and get permission to play it with sound.
+ * Call synchronously inside the Export tap: iOS only allows unmuted play()
+ * that starts during a user gesture.
+ */
+export function primeVideo(srcUrl) {
+  const video = document.createElement('video');
+  video.playsInline = true;
+  video.preload = 'auto';
+  video.src = srcUrl;
+  const p = video.play();
+  if (p) p.then(() => video.pause()).catch(() => {});
+  return video;
+}
+
+/**
  * Play the video once in real time, drawing frame + captions to a canvas and
  * recording it with the original audio. Resolves to { blob, ext }.
+ * `video` comes from primeVideo(); `actx` is an already-running AudioContext.
  */
-export async function burnIn(srcUrl, draw, { onProgress, signal, maxSide = 1920 } = {}) {
-  const video = document.createElement('video');
-  video.src = srcUrl;
-  video.playsInline = true;
-  video.crossOrigin = 'anonymous';
-  video.preload = 'auto';
-  await new Promise((res, rej) => { video.onloadedmetadata = res; video.onerror = () => rej(new Error('Could not load the video for export.')); });
-  const k = Math.min(1, maxSide / Math.max(video.videoWidth, video.videoHeight));
+export async function burnIn(video, actx, draw, { onProgress, signal, maxSide = 1920, bitrate = 10_000_000 } = {}) {
+  if (!(video.readyState >= 1)) {
+    await new Promise((res, rej) => {
+      const t = setTimeout(() => rej(new Error('The video took too long to load for export.')), 15000);
+      video.onloadedmetadata = () => { clearTimeout(t); res(); };
+      video.onerror = () => { clearTimeout(t); rej(new Error('Could not load the video for export.')); };
+    });
+  }
+  const k = Math.min(1, maxSide / Math.max(video.videoWidth || 1080, video.videoHeight || 1920));
   const canvas = document.createElement('canvas');
-  canvas.width = Math.round((video.videoWidth * k) / 2) * 2;
-  canvas.height = Math.round((video.videoHeight * k) / 2) * 2;
+  canvas.width = Math.round(((video.videoWidth || 1080) * k) / 2) * 2;
+  canvas.height = Math.round(((video.videoHeight || 1920) * k) / 2) * 2;
   const ctx = canvas.getContext('2d');
 
   const stream = canvas.captureStream(30);
-  const actx = new AudioContext();
   const dest = actx.createMediaStreamDestination();
-  actx.createMediaElementSource(video).connect(dest);
+  const source = actx.createMediaElementSource(video);
+  source.connect(dest);
   dest.stream.getAudioTracks().forEach((tr) => stream.addTrack(tr));
 
   const mimeType = pickRecorderType();
-  const rec = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 10_000_000 });
+  const rec = new MediaRecorder(stream, mimeType ? { mimeType, videoBitsPerSecond: bitrate } : { videoBitsPerSecond: bitrate });
   const chunks = [];
   rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
   const done = new Promise((res) => (rec.onstop = res));
 
+  let stopped = false, failure = null, lastT = -1, lastMove = performance.now();
   const paint = () => {
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     draw(ctx, video.currentTime);
     onProgress?.(video.currentTime / (video.duration || 1));
   };
-  let stopped = false;
+  const stop = (err) => {
+    if (stopped) return;
+    stopped = true;
+    failure = err || null;
+    video.pause();
+    try { paint(); } catch {}
+    setTimeout(() => rec.state !== 'inactive' && rec.stop(), 150);
+  };
   const loop = () => {
     if (stopped) return;
     paint();
+    if (video.currentTime !== lastT) { lastT = video.currentTime; lastMove = performance.now(); }
     if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(loop);
     else requestAnimationFrame(loop);
   };
-  const stop = () => { if (!stopped) { stopped = true; paint(); setTimeout(() => rec.state !== 'inactive' && rec.stop(), 150); } };
-  signal?.addEventListener('abort', () => { video.pause(); stop(); });
-  video.onended = stop;
+  // Watchdog: if playback stops moving (decoder stall, tab hidden), fail instead of hanging.
+  const watchdog = setInterval(() => {
+    if (!stopped && performance.now() - lastMove > 8000) stop(new Error('Playback stalled during export. Keep the app open and on screen, then try again.'));
+  }, 1000);
+  const onHide = () => { if (document.hidden) stop(new Error('Export stopped because the app went to the background. Keep it on screen while exporting.')); };
+  document.addEventListener('visibilitychange', onHide);
+  signal?.addEventListener('abort', () => stop(new DOMException('Export cancelled', 'AbortError')));
+  video.onended = () => stop();
 
-  paint();
-  rec.start(500);
-  await actx.resume();
-  await video.play();
-  loop();
-  await done;
-  actx.close();
-  if (signal?.aborted) throw new DOMException('Export cancelled', 'AbortError');
-  const type = mimeType.split(';')[0] || 'video/webm';
+  try {
+    video.currentTime = 0;
+    paint();
+    rec.start(1000);
+    if (actx.state !== 'running') await Promise.race([actx.resume(), new Promise((r) => setTimeout(r, 3000))]);
+    await video.play();
+    lastMove = performance.now();
+    loop();
+    await done;
+  } catch (e) {
+    stop(e);
+    await Promise.race([done, new Promise((r) => setTimeout(r, 1000))]);
+    failure = failure || e;
+  } finally {
+    clearInterval(watchdog);
+    document.removeEventListener('visibilitychange', onHide);
+    try { source.disconnect(); } catch {}
+    stream.getTracks().forEach((t) => t.stop());
+    video.removeAttribute('src');
+    video.load();
+  }
+  if (failure) throw failure;
+  const type = (rec.mimeType || mimeType).split(';')[0] || 'video/webm';
   return { blob: new Blob(chunks, { type }), ext: type.includes('mp4') ? 'mp4' : 'webm' };
 }

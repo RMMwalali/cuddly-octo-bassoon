@@ -150,9 +150,9 @@ export function wordsFromCues(cues) {
  * powerset classes are 0 none, 1-3 single speakers, 4 {1,2}, 5 {1,3}, 6 {2,3}.
  * Overlapped speech goes to the first speaker in the pair.
  */
-export function assignSpeakers(words, segments, { minShare = 0.04 } = {}) {
+export function assignSpeakers(words, segments, { minShare = 0.04, powerset = true } = {}) {
   if (!words.length) return words;
-  const single = (id) => ({ 4: 1, 5: 1, 6: 2 })[id] ?? id;
+  const single = (id) => (powerset ? ({ 4: 1, 5: 1, 6: 2 })[id] ?? id : id);
   const raw = words.map((w) => {
     const score = new Map();
     for (const s of segments) {
@@ -183,6 +183,69 @@ export function assignSpeakers(words, segments, { minShare = 0.04 } = {}) {
   raw.forEach((k) => { if (!order.includes(k)) order.push(k); });
   words.forEach((w, i) => { if (!w.speakerManual) w.speaker = `S${order.indexOf(raw[i]) + 1}`; });
   return words;
+}
+
+/** pyannote-segmentation-3.0 powerset class -> one local speaker (0 = nobody). */
+export const POWERSET_TO_SPEAKER = [0, 1, 2, 3, 1, 1, 2];
+
+/**
+ * Join per-window speaker labels into one timeline with consistent speakers.
+ * The model labels speakers 1-3 *within* each ~10 s window, and those labels
+ * mean nothing across windows. Windows overlap, so each new window's speakers
+ * are matched to the previous window's by how much they agree in the overlap.
+ *
+ * `windows`: [{ start, frameDur, frames }] sorted by start; `frames` holds a
+ * local speaker (0-3) per frame. Returns [{ id, start, end }] with ids 1..N.
+ */
+export function stitchDiarization(windows) {
+  if (!windows.length) return [];
+  const maps = [];
+  let nextGlobal = 1;
+  windows.forEach((win, k) => {
+    const map = new Map();
+    if (k > 0) {
+      const prev = windows[k - 1], pmap = maps[k - 1];
+      const counts = new Map();
+      for (let i = 0; i < win.frames.length; i++) {
+        const t = win.start + (i + 0.5) * win.frameDur;
+        const j = Math.floor((t - prev.start) / prev.frameDur);
+        if (j < 0 || j >= prev.frames.length) continue;
+        const a = win.frames[i], b = pmap.get(prev.frames[j]);
+        if (!a || !b) continue;
+        const key = `${a}|${b}`;
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+      const used = new Set();
+      [...counts.entries()].sort((x, y) => y[1] - x[1]).forEach(([key, n]) => {
+        const [a, b] = key.split('|').map(Number);
+        if (n < 3 || map.has(a) || used.has(b)) return;
+        map.set(a, b);
+        used.add(b);
+      });
+    }
+    for (const local of win.frames) if (local && !map.has(local)) map.set(local, nextGlobal++);
+    // Global ids already in use keep counting up from the highest seen.
+    for (const g of map.values()) nextGlobal = Math.max(nextGlobal, g + 1);
+    maps.push(map);
+  });
+  // Each window owns the time between the midpoints of its overlaps.
+  const segs = [];
+  windows.forEach((win, k) => {
+    const end = win.start + win.frames.length * win.frameDur;
+    const prevEnd = k > 0 ? windows[k - 1].start + windows[k - 1].frames.length * windows[k - 1].frameDur : null;
+    const from = k > 0 ? (win.start + prevEnd) / 2 : -Infinity;
+    const to = k < windows.length - 1 ? (windows[k + 1].start + end) / 2 : Infinity;
+    for (let i = 0; i < win.frames.length; i++) {
+      const t0 = win.start + i * win.frameDur;
+      if (t0 + win.frameDur <= from || t0 >= to) continue;
+      const id = maps[k].get(win.frames[i]) || 0;
+      const s = Math.max(t0, from), e = Math.min(t0 + win.frameDur, to);
+      const last = segs[segs.length - 1];
+      if (last && last.id === id && Math.abs(last.end - s) < 1e-6) last.end = e;
+      else segs.push({ id, start: s, end: e });
+    }
+  });
+  return segs.filter((x) => x.id);
 }
 
 /** Keep `cast` in step with the speakers words actually use. Existing names and colors are kept. */

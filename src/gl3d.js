@@ -158,12 +158,22 @@ function mask(text, font, w, px, kind) {
   ctx.lineJoin = 'round';
   ctx.fillStyle = ctx.strokeStyle = '#fff';
   const ox = pad, oy = pad + asc;
-  if (kind === 'blur') ctx.filter = `blur(${Math.max(1, px * 0.08)}px)`;
-  if (kind !== 'fill' || faux) {
-    ctx.lineWidth = kind === 'fill' ? faux : stroke;
-    ctx.strokeText(text, ox, oy);
+  // Canvas filters are missing on older iOS Safari; fall back to a few soft offset copies.
+  const canFilter = 'filter' in ctx && (ctx.filter = 'blur(1px)', ctx.filter === 'blur(1px)');
+  ctx.filter = 'none';
+  if (kind === 'blur' && canFilter) ctx.filter = `blur(${Math.max(1, px * 0.08)}px)`;
+  if (kind === 'blur' && !canFilter) {
+    const r = Math.max(1, px * 0.06);
+    ctx.globalAlpha = 0.2;
+    for (const [dx, dy] of [[-r, 0], [r, 0], [0, -r], [0, r], [0, 0]]) { ctx.lineWidth = stroke; ctx.strokeText(text, ox + dx, oy + dy); ctx.fillText(text, ox + dx, oy + dy); }
+    ctx.globalAlpha = 1;
+  } else {
+    if (kind !== 'fill' || faux) {
+      ctx.lineWidth = kind === 'fill' ? faux : stroke;
+      ctx.strokeText(text, ox, oy);
+    }
+    ctx.fillText(text, ox, oy);
   }
-  ctx.fillText(text, ox, oy);
   ctx.filter = 'none';
 
   const gl = G.gl;
@@ -176,7 +186,7 @@ function mask(text, font, w, px, kind) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   const m = { tex, w: c.width, h: c.height, ox, oy };
   G.cache.set(key, m);
-  while (G.cache.size > 400) {
+  while (G.cache.size > 150) {
     const [k0, v0] = G.cache.entries().next().value;
     gl.deleteTexture(v0.tex);
     G.cache.delete(k0);
@@ -217,6 +227,13 @@ function quad(m, model, x, y, color, alpha) {
 }
 
 const LIGHT = (() => { const v = [-0.35, -0.55, 0.76]; const n = Math.hypot(...v); return v.map((x) => x / n); })();
+
+/** Free GPU textures (call after an export). */
+export function clear3DCache() {
+  if (!G || !G.cache) return;
+  for (const m of G.cache.values()) G.gl.deleteTexture(m.tex);
+  G.cache.clear();
+}
 
 /**
  * Draw caption `cap` (already laid out as `L` by layoutCaption) in 3D onto ctx.

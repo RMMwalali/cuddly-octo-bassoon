@@ -3,26 +3,6 @@
 
 export const TARGET_RATE = 16000;
 
-/** Decode any audio/video file the browser can play into 16 kHz mono samples. */
-export async function decodeToMono16k(fileOrBuffer) {
-  const buf = fileOrBuffer instanceof ArrayBuffer ? fileOrBuffer : await fileOrBuffer.arrayBuffer();
-  const ctx = new (window.AudioContext || window.webkitAudioContext)();
-  let decoded;
-  try {
-    decoded = await ctx.decodeAudioData(buf.slice(0));
-  } finally {
-    ctx.close?.();
-  }
-  const length = Math.ceil(decoded.duration * TARGET_RATE);
-  const offline = new OfflineAudioContext(1, Math.max(1, length), TARGET_RATE);
-  const src = offline.createBufferSource();
-  src.buffer = decoded;
-  src.connect(offline.destination);
-  src.start();
-  const rendered = await offline.startRendering();
-  return { samples: rendered.getChannelData(0), sampleRate: TARGET_RATE, duration: decoded.duration };
-}
-
 const toDb = (rms) => 20 * Math.log10(rms + 1e-9);
 
 /** Loudness of a span in dB: 80th percentile of 20 ms frame RMS (robust to soft word edges). */
@@ -96,6 +76,25 @@ export function spanPitchHz(samples, sampleRate, start, end) {
   if (!hz.length) return 0;
   hz.sort((a, b) => a - b);
   return hz[Math.floor(hz.length / 2)];
+}
+
+/**
+ * Same as wordFeatures, but yields to the browser every few words so a phone's
+ * page stays responsive on long videos. onProgress(0..1).
+ */
+export async function wordFeaturesAsync(words, samples, sampleRate, onProgress) {
+  const out = [];
+  let last = performance.now();
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    out.push({ db: spanLoudnessDb(samples, sampleRate, w.start, w.end), hz: spanPitchHz(samples, sampleRate, w.start, w.end) });
+    if (performance.now() - last > 30) {
+      onProgress?.(i / words.length);
+      await new Promise((r) => setTimeout(r, 0));
+      last = performance.now();
+    }
+  }
+  return out;
 }
 
 /** Per-word acoustic features used by the reaction engine. */

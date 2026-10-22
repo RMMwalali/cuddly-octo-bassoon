@@ -11,7 +11,8 @@ import { CWI } from './cwi.js';
 import { getFont, familyStack, fontWeight, fauxBold } from './fonts.js';
 
 export const MOTIONS = {
-  flat: { label: 'Flat', hint: 'Classic CWI' },
+  pop: { label: 'Pop', hint: 'Words pop up as they are said', flat: true },
+  flat: { label: 'Still', hint: 'Classic CWI, no extra motion', flat: true },
   extrude: { label: 'Extrude', hint: 'Solid 3D letters' },
   flip: { label: 'Flip', hint: 'Words flip up as they are said' },
   swing: { label: 'Swing', hint: 'Words swing open like doors' },

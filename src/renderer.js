@@ -21,10 +21,12 @@ export const DEFAULT_SETTINGS = {
   names: false,
   sensitivity: 1,
   font: DEFAULT_FONT,
-  motion: 'flat', // see MOTIONS in gl3d.js
+  motion: 'pop', // see MOTIONS in gl3d.js
 };
 
 const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const easeOutCubic = (x) => 1 - (1 - x) ** 3;
+const easeOutBack = (x) => { const c1 = 1.7, c3 = c1 + 1; return 1 + c3 * (x - 1) ** 3 + c1 * (x - 1) ** 2; };
 
 /** CSS `ease`, i.e. cubic-bezier(0.25, 0.1, 0.25, 1), solved for y at x. */
 export function ease(x) {
@@ -72,7 +74,7 @@ export function layoutCaption(ctx, cap, byId, W, H, settings) {
   const maxW = W * 0.86;
   const font = getFont(settings.font);
   // 3D words lift toward the camera and look bigger, so give them more room.
-  const is3D = settings.motion && settings.motion !== 'flat';
+  const is3D = !!settings.motion && !MOTIONS[settings.motion]?.flat;
   const items = cap.wordIds.map((id) => byId.get(id)).filter(Boolean).map((w) => {
     const px = base * w.size;
     ctx.font = fontFor(w, px, font);
@@ -125,7 +127,7 @@ export function drawCaptions(ctx, project, t, settings) {
   const enter = clamp((t - cap.start) / 0.12);
   const anim = CWI.ANIMATION_MS / 1000;
 
-  if (settings.motion && settings.motion !== 'flat' && draw3D(ctx, L, cap, color, t, settings, enter)) {
+  if (settings.motion && !MOTIONS[settings.motion]?.flat && draw3D(ctx, L, cap, color, t, settings, enter)) {
     if (settings.names && speaker) drawName(ctx, L, speaker.name, color, enter, W);
     return cap;
   }
@@ -145,15 +147,26 @@ export function drawCaptions(ctx, project, t, settings) {
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
   ctx.lineJoin = 'round';
+  const pop = settings.motion === 'pop';
+  // Pop: the caption slides up into place, and each word starts a little
+  // smaller and dimmer, then springs up to full size as it's spoken.
+  const rise = pop ? (1 - easeOutCubic(enter)) * L.base * 0.35 : 0;
   for (const l of L.lines) {
     for (const it of l.items) {
       const { w } = it;
       const k = t >= w.start ? ease((t - w.start) / anim) : 0;
-      let scale = 1;
-      if (w.emphasis && t >= w.start && t < w.start + anim) scale = 1 + CWI.BOUNCE * Math.sin((Math.PI * (t - w.start)) / anim);
+      let scale = 1, dy = rise, alpha = 1;
+      if (pop) {
+        const q = t >= w.start ? clamp((t - w.start) / 0.28) : 0;
+        scale = 0.92 + 0.08 * easeOutBack(q);
+        dy += (1 - easeOutCubic(q)) * it.px * 0.12;
+        alpha = 0.6 + 0.4 * clamp(q * 1.5);
+      }
+      if (w.emphasis && t >= w.start && t < w.start + anim) scale *= 1 + CWI.BOUNCE * Math.sin((Math.PI * (t - w.start)) / anim);
       ctx.save();
+      ctx.globalAlpha *= alpha;
       // Scale from the word's bottom center so the bounce rises upward.
-      ctx.translate(it.x + it.width / 2, it.y);
+      ctx.translate(it.x + it.width / 2, it.y + dy);
       ctx.scale(scale, scale);
       ctx.font = fontFor(w, it.px, L.font);
       const faux = fauxBold(L.font, w.weight, it.px);

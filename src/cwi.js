@@ -99,6 +99,43 @@ export function clampWords(words, duration) {
   return words;
 }
 
+// Phrases Whisper is known to invent over silence, music or noise.
+const HALLUCINATIONS = [
+  'thank you for watching', 'thanks for watching', 'please subscribe', 'subscribe to my channel',
+  'like and subscribe', 'subtitles by', 'transcribed by', 'see you next time', "i don't know",
+  'you know what i mean', 'bye bye', 'thank you', 'the end',
+];
+
+/**
+ * Remove words the speech model made up. Needs word loudness (w.f.db) from
+ * wordFeatures. A word is dropped when it sits in near-silence compared with
+ * the clip's speech, or when it belongs to a stock phrase (see above) that is
+ * also quieter than real speech, or when it is absurdly stretched.
+ */
+export function dropInventedWords(words) {
+  const dbs = words.map((w) => w.f?.db).filter((d) => Number.isFinite(d) && d > -90).sort((a, b) => a - b);
+  if (dbs.length < 3) return words;
+  const median = dbs[Math.floor(dbs.length / 2)];
+  const quiet = (w) => !w.f || w.f.db < Math.max(-62, median - 26);
+  const soft = (w) => !w.f || w.f.db < median - 12;
+  const bad = new Set();
+  words.forEach((w, i) => {
+    if (quiet(w) || w.end - w.start > 2.5) bad.add(i);
+  });
+  // Stock phrases: check every window of words that spells one out.
+  const norm = words.map((w) => w.text.toLowerCase().replace(/[^\p{L}\p{N}' ]/gu, ''));
+  for (const phrase of HALLUCINATIONS) {
+    const parts = phrase.split(' ');
+    for (let i = 0; i + parts.length <= words.length; i++) {
+      if (!parts.every((p, k) => norm[i + k] === p)) continue;
+      const span = words.slice(i, i + parts.length);
+      const isolated = (i === 0 || words[i].start - words[i - 1].end > 0.6) && (i + parts.length === words.length || words[i + parts.length].start - words[i + parts.length - 1].end > 0.6);
+      if (span.every(soft) || (isolated && span.some(soft))) for (let k = 0; k < parts.length; k++) bad.add(i + k);
+    }
+  }
+  return words.filter((_, i) => !bad.has(i));
+}
+
 /** Parse SRT or WebVTT into cues. Keeps `<v Name>` voice tags as the speaker. */
 export function parseCues(src) {
   const cues = [];

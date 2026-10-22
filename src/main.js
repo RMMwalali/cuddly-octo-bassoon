@@ -2,7 +2,7 @@ import { wordFeatures, wordFeaturesAsync, envelope } from './audio.js';
 import { decodeFile, captureByPlayback, unlockAudio, audioContext, playSamples } from './audio-decode.js';
 import {
   wordsFromWhisper, parseCues, wordsFromCues, assignSpeakers, analyze, fromCWIDocument, SPEAKER_COLORS, CWI,
-  speechUnits, groupVoices, unitsToSegments, clampWords,
+  speechUnits, groupVoices, unitsToSegments, clampWords, dropInventedWords,
 } from './cwi.js';
 import { drawCaptions, DEFAULT_SETTINGS, MOTIONS } from './renderer.js';
 import { FONTS, getFont, ensureFont, cssUrl, familyStack } from './fonts.js';
@@ -32,13 +32,13 @@ const state = {
 
 function loadSettings() {
   try {
-    const s = JSON.parse(localStorage.getItem('rc-cwi-settings') || 'null');
+    const s = JSON.parse(localStorage.getItem('rc-cwi-settings-v2') || 'null');
     if (s) return { ...DEFAULT_SETTINGS, ...s };
   } catch {}
   return { ...DEFAULT_SETTINGS };
 }
 function saveSettings() {
-  try { localStorage.setItem('rc-cwi-settings', JSON.stringify(state.settings)); } catch {}
+  try { localStorage.setItem('rc-cwi-settings-v2', JSON.stringify(state.settings)); } catch {}
 }
 
 // ------------------------------------------------------------------ workers
@@ -101,6 +101,30 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
   for (const c of [models, voices]) c.lastBeat = c.lastBytes = performance.now();
 });
+
+// ------------------------------------------------------------------ crash breadcrumbs
+// iPhone Safari silently reloads the page when it runs out of memory. Note
+// what we were doing, so after a reload we can say what happened and adapt.
+const CRUMB = 'rc-working';
+function crumb(stage, extra = {}) {
+  try {
+    if (stage) sessionStorage.setItem(CRUMB, JSON.stringify({ stage, at: Date.now(), ...extra }));
+    else sessionStorage.removeItem(CRUMB);
+  } catch {}
+}
+function checkLastCrash() {
+  let c = null;
+  try { c = JSON.parse(sessionStorage.getItem(CRUMB) || 'null'); sessionStorage.removeItem(CRUMB); } catch {}
+  if (!c || Date.now() - c.at > 30 * 60 * 1000) return;
+  const where = { open: 'opening the video', audio: 'reading the audio', speech: 'recognising speech', voices: 'telling voices apart', export: 'exporting the video' }[c.stage] || 'working';
+  let tip = 'Try a shorter clip (under 2 minutes) or record at 1080p instead of 4K.';
+  if (c.stage === 'speech' && c.model && !/tiny/.test(c.model)) {
+    $('#model').value = 'onnx-community/whisper-tiny_timestamped';
+    tip = 'The Fast speech model is now selected, which needs much less memory. Try again.';
+  }
+  if (c.stage === 'export') tip = 'Try exporting again with the phone plugged in and other apps closed, or export the subtitle file instead.';
+  toast(`Your phone ran out of memory while ${where}${c.size ? ` (${Math.round(c.size / 1048576)} MB file)` : ''}, so the page restarted. ${tip}`, true, 15000);
+}
 
 // ------------------------------------------------------------------ keep the phone awake
 let wakeLock = null;
@@ -191,7 +215,10 @@ function waitForMetadata(el, ms = 10000) {
 function listenWithTap(signal) {
   return new Promise((resolve, reject) => {
     const mins = Math.max(1, Math.round((video.duration || 60) / 60));
-    work('One more step for this file', 0, `Your browser can't read this file's audio directly, so the app will listen to it while it plays once (about ${mins} min, sound muted). Keep this screen open.`);
+    const big = state.file && isPhone() && state.file.size > 200 * 1048576;
+    work('One more step for this file', 0, big
+      ? `This video is large for a phone, so instead of loading it all at once the app will listen to it while it plays (about ${mins} min, sound muted). Keep this screen open.`
+      : `Your browser can't read this file's audio directly, so the app will listen to it while it plays once (about ${mins} min, sound muted). Keep this screen open.`);
     const onAbort = () => reject(new DOMException('Cancelled', 'AbortError'));
     signal.addEventListener('abort', onAbort, { once: true });
     workButtons([
@@ -212,6 +239,7 @@ function listenWithTap(signal) {
  * (groupVoices in cwi.js).
  */
 async function detectSpeakers(words, signal) {
+  crumb('voices', { size: state.file?.size });
   if (isPhone()) models.release(); // free Whisper's memory before the voice model loads
   const units = speechUnits(words);
   const res = await withRetry(() => {
@@ -246,6 +274,7 @@ async function captionFromAudio(signal) {
     state.source = 'imported-subtitles+browser-prosody';
   } else {
     work('Loading speech model…', null, '');
+    crumb('speech', { model: $('#model').value, size: state.file?.size });
     downloads.clear();
     const res = await withRetry(() => {
       const samples = state.audio.samples.slice();
@@ -270,6 +299,12 @@ async function captionFromAudio(signal) {
   work('Measuring pitch and volume…', 0, '');
   const feats = await wordFeaturesAsync(words, state.audio.samples, state.audio.sampleRate, (f) => work(null, f));
   words.forEach((w, i) => (w.f = feats[i]));
+  if (!state.subs) {
+    const before = words.length;
+    words = dropInventedWords(words);
+    if (!words.length) throw new Error('No clear speech was found in this video.');
+    state.dropped = before - words.length;
+  }
   state.project = analyze({ words, cast: [] }, state.settings);
 }
 
@@ -297,6 +332,7 @@ async function redoCaptions() {
     workDone();
     if (e?.name !== 'AbortError') toast(friendlyError(e), true, 9000);
   } finally {
+    crumb(null);
     state.subs = keepSubs;
     state.busy = false;
     state.abort = null;
@@ -328,6 +364,7 @@ async function openFile(file) {
   $('#exportBtn').disabled = true;
   try {
     work('Opening video…', null, '');
+    crumb('open', { size: file.size });
     workButtons([{ label: 'Cancel', onClick: () => ctrl.abort() }]);
     video.src = state.url;
     await waitForMetadata(video);
@@ -336,7 +373,11 @@ async function openFile(file) {
       toast('This is a big file for a phone. If the app closes, trim the clip first or use a computer.', false, 8000);
     }
     work('Reading audio…', null, '');
+    crumb('audio', { size: file.size });
     try {
+      // Phones: very large files are listened to while they play instead of
+      // being loaded into memory in one piece.
+      if (isPhone() && file.size > 200 * 1048576) throw Object.assign(new Error('Large file on a phone'), { name: 'TooBigForPhone' });
       state.audio = await decodeFile(file, video.duration);
     } catch (e) {
       if (/memory|allocation|Array buffer/i.test(e?.message || '')) throw e;
@@ -370,6 +411,7 @@ async function openFile(file) {
       if (state.project?.words.length) $('#exportBtn').disabled = false;
     }
   } finally {
+    crumb(null);
     state.busy = false;
     state.abort = null;
     allowSleep();
@@ -921,6 +963,7 @@ async function exportVideo(exportEl) {
   const ctrl = new AbortController();
   const phone = isPhone();
   work('Rendering your video…', 0, 'It plays once in real time. Keep this screen open and on this app.');
+  crumb('export', { size: state.file?.size });
   workButtons([{ label: 'Cancel', onClick: () => ctrl.abort() }]);
   try {
     await loadFonts();
@@ -947,6 +990,7 @@ async function exportVideo(exportEl) {
   } catch (e) {
     if (e.name !== 'AbortError') { console.error(e); toast(`Export failed: ${e.message}`, true, 9000); }
   } finally {
+    crumb(null);
     workDone();
     clear3DCache();
     allowSleep();
@@ -960,6 +1004,7 @@ function loadFonts() {
 }
 buildPickers();
 syncSettings();
+checkLastCrash();
 // The Fast model invents words too often on real phone recordings, so every
 // device starts on Balanced (about 80 MB, downloaded once).
 // iOS only allows audio that starts in a tap, so unlock it on the first one.

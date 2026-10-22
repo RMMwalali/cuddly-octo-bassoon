@@ -260,3 +260,19 @@ test('word times are kept inside the clip', async () => {
   assert.ok(words[1].end <= 30.2 && words[1].end > words[1].start);
 });
 
+
+test('invented words over silence are removed, real speech is kept', async () => {
+  const { dropInventedWords } = await import('../src/cwi.js');
+  const mk = (t, s, db) => ({ ...wordsFromWhisper([{ text: t, timestamp: [s, s + 0.3] }])[0], f: { db, hz: 150 } });
+  const words = [
+    mk('so', 0, -22), mk('today', 0.4, -20), mk('we', 0.8, -21), mk('cook', 1.2, -19),
+    mk("I", 3.0, -58), mk("don't", 3.3, -57), mk('know.', 3.6, -56), // invented in a silent gap
+    mk('Thank', 6.0, -38), mk('you', 6.3, -39), // stock phrase, quiet and isolated
+    mk('rice', 1.6, -23),
+  ];
+  const kept = dropInventedWords(words).map((w) => w.text);
+  assert.deepEqual(kept, ['so', 'today', 'we', 'cook', 'rice']);
+  // A spoken "I don't know" at normal volume stays.
+  const real = [mk('I', 0, -20), mk("don't", 0.3, -21), mk('know', 0.6, -20), mk('honestly', 0.9, -22)];
+  assert.equal(dropInventedWords(real).length, 4);
+});

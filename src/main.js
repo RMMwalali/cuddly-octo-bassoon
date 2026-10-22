@@ -11,6 +11,8 @@ import { toSRT, toVTT, toASS, toCWIJSON, download, burnIn, primeVideo, saveVideo
 import { clear3DCache } from './gl3d.js';
 import { toCWIDocument } from './cwi.js';
 import { Strip } from './strip.js';
+import { cloudAvailable, cloudTranscribe } from './cloud.js';
+import { cloudChunks, cloudSegments } from './cloud-words.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -265,14 +267,60 @@ async function withRetry(fn, signal, tries = 3) {
   }
 }
 
+/**
+ * Fast mode: send a compressed copy of the speech to our /api/transcribe
+ * function. Returns words (null when cloud mode is off, not set up, or fails,
+ * so the caller falls back to on-device Whisper).
+ */
+async function transcribeInCloud(signal) {
+  if ($('#engine').value === 'device') return null;
+  const cloud = await cloudAvailable();
+  if (!cloud) return null;
+  const mode = $('#speakerMode').value;
+  crumb('cloud', { size: state.file?.size });
+  let res;
+  try {
+    res = await cloudTranscribe(state.audio.samples, {
+      language: $('#language').value,
+      speakers: mode !== '1',
+      signal,
+      maxBytes: cloud.maxBytes,
+      onStatus: (text, f) => work(text, f, 'Fast mode. Your audio is sent for transcription and not stored.'),
+    });
+  } catch (e) {
+    if (e?.name === 'AbortError') throw e;
+    console.warn('Cloud transcription failed; using on-device', e);
+    toast(`Fast mode didn't work (${e.message}). Transcribing on this device instead.`, true, 7000);
+    return null;
+  }
+  const words = clampWords(wordsFromWhisper(cloudChunks(res.words)), state.audio.duration);
+  if (!words.length) throw new Error('No speech was found in this video.');
+  words.cloudSpeakers = false;
+  if (res.speakers && mode !== '1') {
+    const segs = cloudSegments(res.words, mode === 'auto' ? null : Number(mode));
+    if (segs.length) {
+      assignSpeakers(words, segs, { powerset: false, minShare: 0.02, minWords: 2 });
+      words.cloudSpeakers = true;
+    }
+  }
+  state.language = res.language || ($('#language').value === 'auto' ? null : $('#language').value);
+  state.source = res.provider + (words.cloudSpeakers || mode === '1' ? '' : '+wespeaker');
+  state.modelUsed = res.provider;
+  return words;
+}
+
 /** Transcribe (or use imported subtitles), find speakers, measure intonation. */
 async function captionFromAudio(signal) {
-  let words;
+  let words = null, cloudSpeakers = false;
   if (state.subs) {
     words = wordsFromCues(parseCues(state.subs.text));
     if (!words.length) throw new Error('No captions were found in that subtitle file.');
     state.source = 'imported-subtitles+browser-prosody';
   } else {
+    words = await transcribeInCloud(signal);
+    if (words) cloudSpeakers = words.cloudSpeakers;
+  }
+  if (!state.subs && !words) {
     work('Loading speech model…', null, '');
     crumb('speech', { model: $('#model').value, size: state.file?.size });
     downloads.clear();
@@ -287,7 +335,7 @@ async function captionFromAudio(signal) {
     state.modelUsed = $('#model').value;
   }
   const named = words.some((w) => w.speakerName);
-  if ($('#speakerMode').value !== '1' && !named) {
+  if ($('#speakerMode').value !== '1' && !named && !cloudSpeakers) {
     try {
       await detectSpeakers(words, signal);
     } catch (e) {
@@ -299,7 +347,7 @@ async function captionFromAudio(signal) {
   work('Measuring pitch and volume…', 0, '');
   const feats = await wordFeaturesAsync(words, state.audio.samples, state.audio.sampleRate, (f) => work(null, f));
   words.forEach((w, i) => (w.f = feats[i]));
-  if (!state.subs) {
+  if (!state.subs && !/^deepgram/.test(state.source)) {
     const before = words.length;
     words = dropInventedWords(words);
     if (!words.length) throw new Error('No clear speech was found in this video.');
@@ -311,7 +359,10 @@ async function captionFromAudio(signal) {
 /** "Words look wrong?": run the speech step again with another model or language. */
 async function redoCaptions() {
   if (state.busy || !state.audio) return;
-  $('#redoModel') && ($('#model').value = $('#redoModel').value);
+  const pick = $('#redoModel')?.value;
+  const engineBefore = $('#engine').value;
+  if (pick === 'cloud') $('#engine').value = 'auto';
+  else if (pick) { $('#engine').value = 'device'; $('#model').value = pick; }
   $('#redoLanguage') && ($('#language').value = $('#redoLanguage').value);
   state.busy = true;
   const ctrl = new AbortController();
@@ -333,6 +384,7 @@ async function redoCaptions() {
     if (e?.name !== 'AbortError') toast(friendlyError(e), true, 9000);
   } finally {
     crumb(null);
+    $('#engine').value = engineBefore;
     state.subs = keepSubs;
     state.busy = false;
     state.abort = null;
@@ -630,9 +682,12 @@ $('#wrongBtn').addEventListener('click', () => {
   const how = i.path === 'playback' ? 'by listening while it played' : 'directly from the file';
   const len = `${(state.audio.duration || 0).toFixed(1)} s of audio from a ${(video.duration || 0).toFixed(1)} s video`;
   const ch = i.channels ? `, ${i.channels} channel${i.channels > 1 ? 's' : ''}` : '';
-  const model = $('#model').selectedOptions[0]?.textContent.split(' (')[0] || '';
+  const usedCloud = /^(deepgram|groq)/.test(state.modelUsed || '');
+  const model = usedCloud ? `${state.modelUsed} (Fast mode)` : $('#model').selectedOptions[0]?.textContent.split(' (')[0] || '';
   $('#wrongInfo').textContent = `The app heard ${len}${ch}, read ${how}. Speech model: ${model}.`;
-  $('#redoModel').value = $('#model').value === 'onnx-community/whisper-small_timestamped' ? $('#model').value : 'onnx-community/whisper-small_timestamped';
+  const cloudOpt = $('#redoModel').querySelector('option[value="cloud"]');
+  cloudOpt.hidden = cloudOpt.disabled = !cloudReady;
+  $('#redoModel').value = !usedCloud && cloudReady ? 'cloud' : 'onnx-community/whisper-small_timestamped';
   $('#redoLanguage').value = $('#language').value;
 });
 $('#hearBtn').addEventListener('click', () => {
@@ -1014,4 +1069,19 @@ document.fonts?.ready.then(draw);
 window.addEventListener('beforeunload', (e) => { if (state.busy) { e.preventDefault(); e.returnValue = ''; } });
 
 // Test hook for the browser tests.
+// Fast (cloud) mode: remember the creator's choice, and hide it when this
+// deployment has no transcription key.
+let cloudReady = false;
+try { const e = localStorage.getItem('rc-engine'); if (e) $('#engine').value = e; } catch {}
+$('#engine').addEventListener('change', () => { try { localStorage.setItem('rc-engine', $('#engine').value); } catch {} });
+cloudAvailable().then((info) => {
+  cloudReady = !!info;
+  if (info) return;
+  const opt = $('#engine').querySelector('option[value="auto"]');
+  opt.textContent = 'Fast (not set up on this site)';
+  opt.disabled = true;
+  $('#engine').value = 'device';
+  $('#privacyLine').textContent = 'Nothing is uploaded. The speech and speaker models download once and are cached by your browser.';
+});
+
 window.__rc = { state, openFile, reanalyze, refresh, killWorker, voices, models };

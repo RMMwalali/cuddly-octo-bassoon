@@ -34,7 +34,7 @@
     "url": "https://reactivecaptions.vercel.app/",
     "applicationCategory": "MultimediaApplication",
     "operatingSystem": "Any (runs in the web browser)",
-    "description": "Expressive automatic captions for videos: speaker colors, word-by-word timing, and typography that follows pitch and volume, inspired by the Caption with Intention design system. Runs on the device; videos are not uploaded.",
+    "description": "Expressive automatic captions for videos: speaker colors, word-by-word timing, and typography that follows pitch and volume, inspired by the Caption with Intention design system. Videos stay on your device; a fast cloud mode or a fully private on-device mode transcribes the speech.",
     "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD", "description": "Free to try" },
     "featureList": ["Automatic transcription in many languages including English and Swahili", "Speaker colors", "Word-by-word animated captions", "Pitch and volume styling", "3D caption styles", "Export burned-in video, SRT, VTT, ASS"],
     "inLanguage": "en"
@@ -100,7 +100,13 @@
                   <option value="german">German</option>
                 </select>
               </label>
-              <label>Accuracy
+              <label>Speed
+                <select id="engine">
+                  <option value="auto" selected>Fast (cloud transcription)</option>
+                  <option value="device">Private (on this device, slower)</option>
+                </select>
+              </label>
+              <label>On-device model
                 <select id="model">
                   <option value="onnx-community/whisper-tiny_timestamped">Fast (about 40 MB download)</option>
                   <option value="onnx-community/whisper-base_timestamped" selected>Balanced (about 80 MB)</option>
@@ -113,7 +119,7 @@
               </div>
             </div>
           </details>
-          <p class="privacy">Nothing is uploaded. The speech and speaker models download once and are cached by your browser.</p>
+          <p class="privacy" id="privacyLine">Your video stays on your device. In Fast mode only a compressed copy of the audio is sent for transcription and it is not stored. Pick Private under Options to keep everything on your device.</p>
           <section class="about" aria-labelledby="aboutTitle">
             <h2 id="aboutTitle">What makes these captions different</h2>
             <p>Most auto captions only show <em>what</em> was said. Reactive Captions also shows <em>how</em>: who is speaking, when each word lands, and how loud or soft it was. It follows the ideas of <a href="https://www.captionwithintention.org/" rel="noopener">Caption with Intention</a>, an award-winning caption design system made with the Deaf and hard-of-hearing community.</p>
@@ -123,11 +129,11 @@
             </details>
             <details>
               <summary>Is my video uploaded anywhere?</summary>
-              <p>No. Transcription, speaker detection and rendering all happen on your own phone or computer. Your video never leaves the device.</p>
+              <p>Your video never leaves your device. In Fast mode, a compressed copy of the audio track is sent to a speech recognition service to be transcribed in a few seconds, and it is not kept. In Private mode (under Options) transcription, speaker detection and rendering all happen on your own phone or computer, so nothing is sent at all.</p>
             </details>
             <details>
               <summary>Does it work on iPhone and Android?</summary>
-              <p>Yes, in Safari and Chrome. The first video downloads the speech model (about 80 MB, so use Wi-Fi), after which it is cached. Clips under 2 minutes work best on phones.</p>
+              <p>Yes, in Safari and Chrome. Fast mode transcribes a typical clip in seconds. Private mode downloads a speech model once (about 80 MB, so use Wi-Fi) and works best with clips under 2 minutes on phones.</p>
             </details>
             <details>
               <summary>Which languages does it understand?</summary>
@@ -248,9 +254,10 @@
           <div class="opt-grid">
             <label>Model
               <select id="redoModel">
-                <option value="onnx-community/whisper-tiny_timestamped">Fast</option>
-                <option value="onnx-community/whisper-base_timestamped">Balanced</option>
-                <option value="onnx-community/whisper-small_timestamped">Best (about 250 MB)</option>
+                <option value="cloud">Fast mode (cloud)</option>
+                <option value="onnx-community/whisper-tiny_timestamped">On device: Fast</option>
+                <option value="onnx-community/whisper-base_timestamped">On device: Balanced</option>
+                <option value="onnx-community/whisper-small_timestamped">On device: Best (about 250 MB)</option>
               </select>
             </label>
             <label>Language

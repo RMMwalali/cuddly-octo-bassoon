@@ -7,6 +7,7 @@
 // every phone and desktop browser; the GPU builds are 2–3x bigger to download.
 
 import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1';
+import { normalizePeak } from './cloud-words.js';
 
 env.allowLocalModels = false;
 
@@ -78,7 +79,11 @@ function cutPoints(samples) {
 
 async function transcribe({ samples, model, language }) {
   const run = await loadASR(model);
+  samples = normalizePeak(samples); // quiet phone recordings get a lift
   const cuts = cutPoints(samples);
+  // Skip only pieces that are near-silent compared with the whole track, so a
+  // quietly recorded video is still transcribed.
+  const silent = Math.min(0.002, Math.max(0.0003, rms(samples) * 0.04));
   const words = [];
   const total = cuts.length - 1;
   const multilingual = !/\.en_/.test(model);
@@ -87,7 +92,7 @@ async function transcribe({ samples, model, language }) {
     const offset = cuts[i] / SR;
     post({ type: 'status', text: total > 1 ? `Transcribing part ${i + 1} of ${total}…` : 'Transcribing…' });
     post({ type: 'transcribe-progress', done: i, total });
-    if (rms(piece) < 0.002) continue; // near-silence: Whisper tends to hallucinate here
+    if (rms(piece) < silent) continue; // near-silence: Whisper tends to hallucinate here
     const opts = { return_timestamps: 'word' };
     if (multilingual) {
       opts.task = 'transcribe';

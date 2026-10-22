@@ -122,6 +122,12 @@ export function dropInventedWords(words) {
   words.forEach((w, i) => {
     if (quiet(w) || w.end - w.start > 2.5) bad.add(i);
   });
+  // Never throw away most of a transcript for being quiet: when that many
+  // words look quiet, the recording is just quiet, so keep them.
+  if (bad.size > words.length * 0.4) {
+    bad.clear();
+    words.forEach((w, i) => { if (w.end - w.start > 2.5) bad.add(i); });
+  }
   // Stock phrases: check every window of words that spells one out.
   const norm = words.map((w) => w.text.toLowerCase().replace(/[^\p{L}\p{N}' ]/gu, ''));
   for (const phrase of HALLUCINATIONS) {

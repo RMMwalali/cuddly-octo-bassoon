@@ -53,7 +53,19 @@ Opening `index.html` directly from disk will not work, because browsers block mo
 When importing to Vercel, set the **Project Name** to `reactivecaptions` so the address is `reactivecaptions.vercel.app`, which the share previews, sitemap and canonical link already point to. If you use another address or your own domain, replace `reactivecaptions.vercel.app` in `index.html`, `robots.txt` and `sitemap.xml`.
 
 
-It is a static site with no build step and no server, so any static host works. The heavy lifting happens in each visitor's browser.
+It is a static site with no build step. Everything works on any static host, with transcription running in each visitor's browser.
+
+### Fast mode (cloud transcription, recommended)
+
+On-device Whisper is private but slow on phones (a model download, then roughly real time or slower). On Vercel, the included function `api/transcribe.js` turns on **Fast mode**: the page compresses the speech to a small MP3 (about 240 KB a minute, never the video) and gets word-timed text back in a few seconds. With Deepgram it also gets speaker labels in the same call, so the voice model is skipped.
+
+1. Create a key with one provider:
+   - **Deepgram** (preferred: words and speakers together; about $0.0043 per audio minute, with free starter credit): [console.deepgram.com](https://console.deepgram.com) → API Keys → Create a key with the Member role.
+   - **Groq** (Whisper large-v3-turbo; $0.04 per audio hour, words only, so speakers are still found on the device): [console.groq.com/keys](https://console.groq.com/keys).
+2. In Vercel: **Project → Settings → Environment Variables**, add `DEEPGRAM_API_KEY` (or `GROQ_API_KEY`, or both: Groq then backs up Deepgram and handles languages Deepgram lacks, such as Swahili), for Production and Preview.
+3. **Deployments → ⋯ → Redeploy** so the function picks up the key.
+
+Without a key, the page detects that and quietly uses on-device transcription. Visitors can always choose **Private** under Options. The key stays on the server; the function only accepts requests from the site's own pages and audio under 4.4 MB (about 18 minutes).
 
 - **Vercel:** in vercel.com choose **Add New → Project**, import this repository, keep the framework preset **Other** with no build command and output directory `.`, and deploy. `vercel.json` adds sensible headers.
 - **Netlify / Cloudflare Pages:** connect the repository, leave the build command empty, publish directory `.`.
@@ -129,6 +141,7 @@ This is a prototype.
 ## Credits
 
 - Caption with Intention, by the Chicago Hearing Society.
+- MP3 encoding uses [lamejs](https://github.com/zhuker/lamejs), a port of [LAME](https://lame.sourceforge.io), included unmodified as `src/vendor/lamejs.js` under the LGPL-3.0 (`src/vendor/LAMEJS-LICENSE`).
 - The validation rules, document format and test fixtures in `test/fixtures/` are from [OpenCaptions](https://github.com/broomva/opencaptions) (MIT).
 
 ## License

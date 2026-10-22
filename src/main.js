@@ -2,7 +2,7 @@ import { wordFeatures, wordFeaturesAsync, envelope } from './audio.js';
 import { decodeFile, captureByPlayback, unlockAudio, audioContext } from './audio-decode.js';
 import {
   wordsFromWhisper, parseCues, wordsFromCues, assignSpeakers, analyze, fromCWIDocument, SPEAKER_COLORS, CWI,
-  changePoints, speechUnits, groupVoices, unitsToSegments, clampWords,
+  speechUnits, groupVoices, unitsToSegments, clampWords,
 } from './cwi.js';
 import { drawCaptions, DEFAULT_SETTINGS, MOTIONS } from './renderer.js';
 import { FONTS, getFont, ensureFont, cssUrl, familyStack } from './fonts.js';
@@ -25,7 +25,7 @@ const state = {
   selected: null,
   subs: null, // { kind: 'cues' | 'cwi', text, name }
   language: null,
-  source: 'browser-whisper+pyannote', // what produced the words, for the CWI metadata
+  source: 'browser-whisper+wespeaker', // what produced the words, for the CWI metadata
   busy: false,
   abort: null, // AbortController for the running analysis
 };
@@ -127,7 +127,6 @@ function onWorkerEvent(d) {
     for (const f of downloads.values()) { loaded += f.loaded; total += f.total; }
     if (total > 0) work(null, loaded / total, `Downloading the ${d.kind} model, ${mb(loaded)} of ${mb(total)}. This happens once.`);
   } else if (d.type === 'transcribe-progress') work(null, d.total ? d.done / d.total : null, '');
-  else if (d.type === 'diarize-progress') work(null, d.total ? d.done / d.total : null, '');
   else if (d.type === 'embed-progress') work('Telling voices apart…', d.total ? d.done / d.total : null, '');
   else if (d.type === 'partial') {
     // Show words as they arrive so people see it working.
@@ -208,24 +207,13 @@ function listenWithTap(signal) {
 }
 
 /**
- * Who said what: the segmentation model marks likely turn changes, speech is
- * cut into short units, each unit gets a voice fingerprint, and fingerprints
- * that sound alike are grouped into one speaker.
+ * Who said what: speech is cut into short pieces at pauses and sentence ends,
+ * each piece gets a voice fingerprint, and pieces that sound alike are grouped
+ * (groupVoices in cwi.js).
  */
 async function detectSpeakers(words, signal) {
-  let cuts = [];
-  try {
-    const seg = await withRetry(() => {
-      const samples = state.audio.samples.slice();
-      return ask({ type: 'diarize', samples }, [samples.buffer]);
-    }, signal);
-    cuts = changePoints(seg.windows);
-  } catch (e) {
-    if (e?.name === 'AbortError') throw e;
-    console.warn('Segmentation failed; using pauses only', e);
-  }
-  if (isPhone()) models.release(); // free Whisper's memory before the next model loads
-  const units = speechUnits(words, cuts);
+  if (isPhone()) models.release(); // free Whisper's memory before the voice model loads
+  const units = speechUnits(words);
   const res = await withRetry(() => {
     const samples = state.audio.samples.slice();
     return voices.ask({ type: 'embed', samples, units: units.map(({ start, end }) => ({ start, end })) }, [samples.buffer]);

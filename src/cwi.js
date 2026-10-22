@@ -542,7 +542,7 @@ export function toCWIDocument(project, meta = {}) {
       language: meta.language || 'und',
       created_at: new Date().toISOString(),
       generator: 'reactive-captions/0.2.0',
-      extractor_backend: meta.backend || 'browser-whisper+pyannote',
+      extractor_backend: meta.backend || 'browser-whisper+wespeaker',
     },
     cast: project.cast.map((s) => ({ id: s.id, name: s.name, color: s.color, voice_profile: s.voice_profile || voiceProfile([]) })),
     captions,

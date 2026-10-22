@@ -85,6 +85,20 @@ export function wordsFromWhisper(chunks) {
   return finishWords(out);
 }
 
+/**
+ * Whisper sometimes stretches the last word of a clip far past the end of the
+ * audio. Keep every word inside the clip and at a sensible length.
+ */
+export function clampWords(words, duration) {
+  if (!Number.isFinite(duration) || duration <= 0) return words;
+  for (const w of words) {
+    w.start = Math.min(w.start, Math.max(0, duration - 0.05));
+    w.end = Math.min(w.end, duration, w.start + 3);
+    if (w.end <= w.start) w.end = Math.min(duration, w.start + 0.05);
+  }
+  return words;
+}
+
 /** Parse SRT or WebVTT into cues. Keeps `<v Name>` voice tags as the speaker. */
 export function parseCues(src) {
   const cues = [];

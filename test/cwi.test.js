@@ -238,3 +238,10 @@ test('voices are grouped by fingerprint and units follow turns', async () => {
   assignSpeakers(words, segs, { powerset: false, minShare: 0, minWords: 1 });
   assert.deepEqual(words.map((w) => w.speaker), ['S1', 'S1', 'S1', 'S1', 'S2', 'S2', 'S1']);
 });
+
+test('word times are kept inside the clip', async () => {
+  const { clampWords } = await import('../src/cwi.js');
+  const words = wordsFromWhisper([{ text: 'ask', timestamp: [28.0, 28.4] }, { text: 'to', timestamp: [29.7, 41.7] }]);
+  clampWords(words, 30.2);
+  assert.ok(words[1].end <= 30.2 && words[1].end > words[1].start);
+});

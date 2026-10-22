@@ -11,10 +11,13 @@ const BINS = 80;
 const EPS = 1.1920928955078125e-7; // float32 epsilon, Kaldi's log floor
 
 let cache = null;
-function tables(sampleRate) {
-  if (cache && cache.sr === sampleRate) return cache;
+function tables(sampleRate, window) {
+  if (cache && cache.sr === sampleRate && cache.window === window) return cache;
   const win = new Float32Array(FRAME);
-  for (let i = 0; i < FRAME; i++) win[i] = Math.pow(0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (FRAME - 1)), 0.85);
+  for (let i = 0; i < FRAME; i++) {
+    const a = (2 * Math.PI * i) / (FRAME - 1);
+    win[i] = window === 'hamming' ? 0.54 - 0.46 * Math.cos(a) : Math.pow(0.5 - 0.5 * Math.cos(a), 0.85);
+  }
   const mel = (f) => 1127 * Math.log(1 + f / 700);
   const lo = mel(20), hi = mel(sampleRate / 2);
   const delta = (hi - lo) / (BINS + 1);
@@ -41,7 +44,7 @@ function tables(sampleRate) {
   const rev = new Uint16Array(NFFT);
   const bits = Math.log2(NFFT);
   for (let i = 0; i < NFFT; i++) { let r = 0; for (let j = 0; j < bits; j++) r |= ((i >> j) & 1) << (bits - 1 - j); rev[i] = r; }
-  cache = { sr: sampleRate, win, filters, cos, sin, rev };
+  cache = { sr: sampleRate, window, win, filters, cos, sin, rev };
   return cache;
 }
 
@@ -69,9 +72,10 @@ function fft(re, im, T) {
  * samples: Float32Array in [-1, 1] at 16 kHz. Returns { data, frames } where
  * data is frames x 80, row-major. `scale` multiplies samples first (WeSpeaker
  * models expect 16-bit range, so 32768). `cmn` subtracts the per-bin mean.
+ * `window` is 'povey' (Kaldi default) or 'hamming' (what WeSpeaker trains with).
  */
-export function fbank(samples, { sampleRate = 16000, scale = 32768, cmn = true } = {}) {
-  const T = tables(sampleRate);
+export function fbank(samples, { sampleRate = 16000, scale = 32768, cmn = true, window = 'povey' } = {}) {
+  const T = tables(sampleRate, window);
   const frames = samples.length < FRAME ? 0 : 1 + Math.floor((samples.length - FRAME) / SHIFT);
   const data = new Float32Array(frames * BINS);
   const re = new Float32Array(NFFT), im = new Float32Array(NFFT);

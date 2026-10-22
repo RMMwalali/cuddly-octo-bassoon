@@ -2,7 +2,7 @@ import { wordFeatures, wordFeaturesAsync, envelope } from './audio.js';
 import { decodeFile, captureByPlayback, unlockAudio, audioContext } from './audio-decode.js';
 import {
   wordsFromWhisper, parseCues, wordsFromCues, assignSpeakers, analyze, fromCWIDocument, SPEAKER_COLORS, CWI,
-  changePoints, speechUnits, clusterVoices, unitsToSegments,
+  changePoints, speechUnits, clusterVoices, unitsToSegments, clampWords,
 } from './cwi.js';
 import { drawCaptions, DEFAULT_SETTINGS, MOTIONS } from './renderer.js';
 import { FONTS, getFont, ensureFont, cssUrl, familyStack } from './fonts.js';
@@ -312,7 +312,7 @@ async function openFile(file) {
           const samples = state.audio.samples.slice();
           return ask({ type: 'transcribe', samples, model: $('#model').value, language: $('#language').value }, [samples.buffer]);
         }, ctrl.signal);
-        words = wordsFromWhisper(res.chunks);
+        words = clampWords(wordsFromWhisper(res.chunks), state.audio.duration);
         if (!words.length) throw new Error('No speech was found in this video.');
         state.language = $('#language').value === 'auto' ? null : $('#language').value;
         state.source = $('#speakerMode').value === 'auto' ? 'browser-whisper+pyannote' : 'browser-whisper';

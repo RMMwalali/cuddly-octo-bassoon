@@ -95,6 +95,8 @@ button, input, select { font: inherit; color: inherit; }
   font-weight: 800; font-variation-settings: 'opsz' 96;
 }
 .drop p { color: var(--muted); margin: 0 auto 24px; max-width: 44ch; }
+.who-talks { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 0 0 16px; font-weight: 600; }
+.who-talks select { font-weight: 600; }
 .drop .privacy { font-size: 13px; margin-top: 24px; }
 .drop-options { margin-top: 22px; text-align: left; border: 1px solid var(--line); border-radius: var(--r-md); }
 .drop-options summary { cursor: pointer; padding: 10px 14px; font-weight: 600; }

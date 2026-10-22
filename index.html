@@ -37,6 +37,15 @@
         <div class="drop-inner">
           <h2>Captions that sound like the people speaking</h2>
           <p>Drop a video. Each speaker gets a color, every word lights up as it's said, and the type gets bolder for lower voices, thinner for higher ones, and bigger when it's loud.</p>
+          <label class="who-talks">Who's talking?
+            <select id="speakerMode">
+              <option value="1">Just me</option>
+              <option value="2">2 people</option>
+              <option value="3">3 people</option>
+              <option value="4">4 people</option>
+              <option value="auto" selected>Not sure, detect it</option>
+            </select>
+          </label>
           <label class="btn primary big">
             Choose video
             <input type="file" id="fileInput" accept="video/*,audio/*" hidden />
@@ -55,15 +64,6 @@
                   <option value="portuguese">Portuguese</option>
                   <option value="hindi">Hindi</option>
                   <option value="german">German</option>
-                </select>
-              </label>
-              <label>How many people speak?
-                <select id="speakerMode">
-                  <option value="auto">Detect automatically</option>
-                  <option value="1">1 person</option>
-                  <option value="2">2 people</option>
-                  <option value="3">3 people</option>
-                  <option value="4">4 people</option>
                 </select>
               </label>
               <label>Accuracy

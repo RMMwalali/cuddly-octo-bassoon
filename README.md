@@ -6,7 +6,7 @@ CWI is a caption design system from the Chicago Hearing Society. It shows *how* 
 
 | CWI pillar | What you see | How it's made automatically |
 |---|---|---|
-| **Attribution** | Each speaker has their own color | In-browser speaker detection (pyannote segmentation), or speaker names from imported subtitles |
+| **Attribution** | Each speaker has their own color | In-browser voice fingerprints (WeSpeaker CAM++) grouped by speaker, or speaker names from imported subtitles |
 | **Synchronization** | Each word turns from white to the speaker's color as it's spoken, over 600 ms, and emphasized words bounce 15% | Word timestamps from Whisper |
 | **Intonation** | Roboto Flex gets **bolder for a lower voice** and thinner for a higher one. Words get **bigger when louder** and smaller when quieter | Pitch and loudness measured for every word, relative to *that speaker's* normal voice |
 
@@ -48,7 +48,15 @@ npm test    # engine, validator and export tests
 
 Opening `index.html` directly from disk will not work, because browsers block module workers on `file://`. Use `npm start` or any static server.
 
-Pushing to `main` runs the tests and publishes to GitHub Pages. Turn that on once under **Settings → Pages → Source: GitHub Actions**.
+### Put it online
+
+It is a static site with no build step and no server, so any static host works. The heavy lifting happens in each visitor's browser.
+
+- **Vercel:** in vercel.com choose **Add New → Project**, import this repository, keep the framework preset **Other** with no build command and output directory `.`, and deploy. `vercel.json` adds sensible headers.
+- **Netlify / Cloudflare Pages:** connect the repository, leave the build command empty, publish directory `.`.
+- **GitHub Pages:** pushing to `main` runs the tests and publishes the site. Turn it on once under **Settings → Pages → Source: GitHub Actions**.
+
+The site must be served over HTTPS (all of these do), because browsers only allow module workers, the model cache and the screen wake lock on secure pages.
 
 ## How it works
 
@@ -56,7 +64,8 @@ Pushing to `main` runs the tests and publishes to GitHub Pages. Turn that on onc
 video
  └ decode to 16 kHz mono                         src/audio.js
     ├ Whisper word timestamps                    src/worker.js  (WebGPU or WASM)
-    ├ pyannote speaker segments                  src/worker.js
+    ├ pyannote turn-change hints                 src/worker.js
+    ├ voice fingerprints (WeSpeaker CAM++)       src/speaker-worker.js + src/fbank.js
     └ per-word pitch (autocorrelation) and loudness      src/audio.js
        └ CWI engine                              src/cwi.js
           speaker attribution, voice profile per speaker,
@@ -82,6 +91,15 @@ Because everything is relative to the speaker, a deep voice is not bold all the 
 
 **Difference from OpenCaptions.** OpenCaptions' V1 RulesMapper makes higher pitch *heavier*. This tool follows the CWI design guide instead: bold for low pitch, thin for high pitch. Both write the same `.cwi.json` fields, so files work in either tool.
 
+### Telling speakers apart
+
+1. Speech is cut into short pieces at pauses, sentence ends and likely turn changes (from pyannote segmentation), at most 3 seconds each.
+2. Each piece of 0.7 s or more gets a voice fingerprint from WeSpeaker CAM++, using Kaldi-style filterbank features computed in JavaScript (`src/fbank.js`, checked against kaldi-native-fbank in the tests).
+3. Pass 1 groups plain fingerprints with a strict threshold, which decides whether there is more than one voice at all, so a solo video is never split.
+4. Pass 2 removes the "same recording" component every fingerprint shares (the average of the pass-1 voices, each weighted equally) and groups again. If the creator chose "How many people speak?", it makes exactly that many groups.
+
+On real recordings this separates an interviewer from the guest and most lines in a fast film argument. Quick interruptions with no pause are the weak spot, and the Words tab fixes a line's speaker in one tap.
+
 ### Models
 
 | Job | Model | First download (approx.) |
@@ -89,7 +107,8 @@ Because everything is relative to the speaker, a deep voice is not bold all the 
 | Speech, Fast | `onnx-community/whisper-tiny_timestamped` | Smallest |
 | Speech, Balanced (default) | `onnx-community/whisper-base_timestamped` | About 80 MB on CPU, 210 MB on GPU |
 | Speech, Best | `onnx-community/whisper-small_timestamped` | Several hundred MB |
-| Speakers | `onnx-community/pyannote-segmentation-3.0` | About 6 MB |
+| Turn changes | `onnx-community/pyannote-segmentation-3.0` | About 6 MB |
+| Voices | WeSpeaker CAM++ (VoxCeleb), via `csukuangfj/speaker-embedding-models` | About 28 MB |
 
 The models come from the Hugging Face Hub via [transformers.js](https://github.com/huggingface/transformers.js) and are cached by the browser.
 
@@ -97,7 +116,8 @@ The models come from the Hugging Face Hub via [transformers.js](https://github.c
 
 This is a prototype.
 
-- **Speaker detection** uses the pyannote segmentation model alone, without voice embeddings. It handles up to 3 speakers and works best on short clips. On long videos it can mix up who is who. The Speakers and Words tabs exist to fix that quickly.
+- **Speaker detection** can mix up voices in very fast exchanges or on old, noisy recordings. Choosing the number of speakers helps; the Words tab fixes the rest.
+- **Phones:** the Fast model (about 40 MB) is the default on phones, everything runs on one CPU thread, and the screen is kept awake while working. Very large files (over about 500 MB) may be too big for a phone's memory. If a browser can't read a file's audio directly (some iPhone .mov files), the app plays it once to listen instead.
 - **Pitch tracking** is a simple autocorrelation tracker. Music, overlapping speech and heavy noise make weights less reliable.
 - **3D styles** need WebGL2, which every current desktop and phone browser has. Without it, captions fall back to flat CWI.
 - **Video export** plays in real time and needs the tab to stay visible. Chrome produces MP4. Other browsers may produce WebM or VP9, which some phone apps reject. In that case, export `.ass` and burn it in with ffmpeg.

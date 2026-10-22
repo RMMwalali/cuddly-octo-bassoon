@@ -231,15 +231,10 @@ async function detectSpeakers(words, signal) {
     return voices.ask({ type: 'embed', samples, units: units.map(({ start, end }) => ({ start, end })) }, [samples.buffer]);
   }, signal);
   const mode = $('#speakerMode').value;
-  const labels = groupVoices(res.vectors, { speakers: mode === 'auto' ? null : Number(mode), first: VOICE_SPLIT, second: VOICE_REGROUP });
+  const labels = groupVoices(res.vectors, { speakers: mode === 'auto' ? null : Number(mode) });
   assignSpeakers(words, unitsToSegments(units, labels), { powerset: false, minShare: 0, minWords: 1 });
   state.voiceDebug = { units: units.length, fingerprinted: res.vectors.filter(Boolean).length, speakers: new Set(labels).size };
 }
-// Calibrated on real recordings (an interview, a film scene, studio speech):
-// pass 1 needs plain fingerprints below 0.55 similarity before it believes
-// there is a second voice; pass 2 groups the recording-neutral prints at 0.
-const VOICE_SPLIT = 0.55;
-const VOICE_REGROUP = 0.0;
 
 /** Retry a model step when its download stalls (mobile data drops out). */
 async function withRetry(fn, signal, tries = 3) {

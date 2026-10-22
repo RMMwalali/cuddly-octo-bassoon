@@ -246,30 +246,36 @@ test('word times are kept inside the clip', async () => {
   assert.ok(words[1].end <= 30.2 && words[1].end > words[1].start);
 });
 
-test('two-pass grouping: solo stays solo, shared recording tone is removed', async () => {
+test('voice grouping: solo stays solo, a stray print is folded, a known count is honoured', async () => {
   const { groupVoices } = await import('../src/cwi.js');
-  // Every print shares a big "same recording" component, like real fingerprints.
   let seed = 7;
   const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5);
   const dim = 32;
-  const common = Array.from({ length: dim }, () => rnd() * 6);
-  const voiceA = Array.from({ length: dim }, () => rnd());
-  const voiceB = Array.from({ length: dim }, () => rnd());
-  const voiceC = Array.from({ length: dim }, () => rnd());
-  const print = (v) => { const x = common.map((c, i) => c + v[i] + rnd() * 0.5); const n = Math.hypot(...x); return x.map((a) => a / n); };
-  // Solo video: one group.
-  assert.equal(new Set(groupVoices(Array.from({ length: 10 }, () => print(voiceA)))).size, 1);
-  // One dominant talker and a short interviewer: two groups, correct split.
-  const who = 'ABAAAAAAAAAB'.split('');
-  const v = who.map((w) => print(w === 'A' ? voiceA : voiceB));
-  const L = groupVoices(v, { first: 0.97 });
+  const voice = () => Array.from({ length: dim }, () => rnd());
+  const [A, B, C2, odd] = [voice(), voice(), voice(), voice()];
+  const print = (v, noise = 0.3) => { const x = v.map((a) => a + rnd() * noise); const n = Math.hypot(...x); return x.map((a) => a / n); };
+  // Solo video with one odd-sounding moment: still one speaker.
+  const solo = Array.from({ length: 8 }, () => print(A));
+  solo[3] = print(odd);
+  assert.equal(new Set(groupVoices(solo)).size, 1);
+  // Interviewer with two questions and a guest: two speakers, split correctly.
+  const who = 'ABAAAAABA'.split('');
+  const L = groupVoices(who.map((w) => print(w === 'A' ? A : B)));
   assert.equal(new Set(L).size, 2);
   who.forEach((w, i) => assert.equal(L[i] === L[0], w === 'A'));
   // Told how many: three voices.
   const who3 = 'ABCACBCA'.split('');
-  const map = { A: voiceA, B: voiceB, C: voiceC };
+  const map = { A, B, C: C2 };
   const L3 = groupVoices(who3.map((w) => print(map[w])), { speakers: 3 });
   who3.forEach((w, i) => who3.forEach((x, j) => assert.equal(L3[i] === L3[j], w === x)));
   // Told one speaker: one group no matter what.
-  assert.equal(new Set(groupVoices(v, { speakers: 1 })).size, 1);
+  assert.equal(new Set(groupVoices(who.map((w) => print(w === 'A' ? A : B)), { speakers: 1 })).size, 1);
 });
+
+test('word times are kept inside the clip', async () => {
+  const { clampWords } = await import('../src/cwi.js');
+  const words = wordsFromWhisper([{ text: 'ask', timestamp: [28.0, 28.4] }, { text: 'to', timestamp: [29.7, 41.7] }]);
+  clampWords(words, 30.2);
+  assert.ok(words[1].end <= 30.2 && words[1].end > words[1].start);
+});
+

@@ -209,3 +209,32 @@ test('windowed speaker labels are stitched into consistent speakers', async () =
   assert.equal(segs[1].id, 2);
   assert.equal(segs[0].end, 12);
 });
+
+test('fbank matches kaldi-native-fbank', async () => {
+  const { fbank } = await import('../src/fbank.js');
+  const ref = JSON.parse(readFileSync(new URL('./fixtures/fbank-ref.json', import.meta.url)));
+  const r = fbank(Float32Array.from(ref.samples), { cmn: false });
+  assert.equal(r.frames, ref.fbank.length);
+  let max = 0;
+  ref.fbank.forEach((row, f) => row.forEach((v, b) => (max = Math.max(max, Math.abs(v - r.data[f * 80 + b])))));
+  assert.ok(max < 0.01, `max diff ${max}`);
+});
+
+test('voices are grouped by fingerprint and units follow turns', async () => {
+  const { speechUnits, clusterVoices, changePoints, unitsToSegments } = await import('../src/cwi.js');
+  const words = wordsFromWhisper([
+    ['hi', 0, 0.3], ['there', 0.35, 0.7], ['how', 0.75, 1.0], ['are', 1.05, 1.3], // A
+    ['good', 1.35, 1.7], ['thanks', 1.75, 2.1], // B, no pause: needs a change point at 1.33
+    ['great', 3.0, 3.4], // A after a pause
+  ].map(([t, s, e]) => ({ text: t, timestamp: [s, e] })));
+  const units = speechUnits(words, [1.33]);
+  assert.deepEqual(units.map((u) => u.wordIdx.length), [4, 2, 1]);
+  const A = [1, 0.1, 0], B = [0, 1, 0.2];
+  assert.deepEqual(clusterVoices([A, B, [0.95, 0.15, 0.05]]), [0, 1, 0]);
+  assert.deepEqual(clusterVoices([A, null, B]), [0, 0, 1]);
+  assert.deepEqual(clusterVoices([A, [0.9, 0.2, 0.1], [1, 0, 0.1]]), [0, 0, 0]);
+  assert.deepEqual(changePoints([{ start: 0, frameDur: 0.5, frames: Int8Array.from([0, 2, 2, 0, 2, 3, 3]) }]), [2.5]);
+  const segs = unitsToSegments(units, [0, 1, 0]);
+  assignSpeakers(words, segs, { powerset: false, minShare: 0, minWords: 1 });
+  assert.deepEqual(words.map((w) => w.speaker), ['S1', 'S1', 'S1', 'S1', 'S2', 'S2', 'S1']);
+});

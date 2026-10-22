@@ -150,7 +150,7 @@ export function wordsFromCues(cues) {
  * powerset classes are 0 none, 1-3 single speakers, 4 {1,2}, 5 {1,3}, 6 {2,3}.
  * Overlapped speech goes to the first speaker in the pair.
  */
-export function assignSpeakers(words, segments, { minShare = 0.04, powerset = true } = {}) {
+export function assignSpeakers(words, segments, { minShare = 0.04, minWords: floor = 3, powerset = true } = {}) {
   if (!words.length) return words;
   const single = (id) => (powerset ? ({ 4: 1, 5: 1, 6: 2 })[id] ?? id : id);
   const raw = words.map((w) => {
@@ -172,7 +172,7 @@ export function assignSpeakers(words, segments, { minShare = 0.04, powerset = tr
   // Speakers with almost no words are usually misdetections: fold them into a neighbour.
   const count = new Map();
   raw.forEach((k) => count.set(k, (count.get(k) || 0) + 1));
-  const minWords = Math.max(3, Math.ceil(words.length * minShare));
+  const minWords = Math.max(floor, Math.ceil(words.length * minShare));
   const keep = (k) => count.get(k) >= minWords;
   const major = [...count.entries()].sort((a, b) => b[1] - a[1])[0][0];
   for (let i = 0; i < raw.length; i++) {
@@ -246,6 +246,95 @@ export function stitchDiarization(windows) {
     }
   });
   return segs.filter((x) => x.id);
+}
+
+/**
+ * Times inside each window where the segmentation model switches directly
+ * from one speaker to another (no silence between): likely turn changes.
+ */
+export function changePoints(windows) {
+  const out = [];
+  for (const w of windows || []) {
+    let prev = 0;
+    for (let i = 0; i < w.frames.length; i++) {
+      const f = w.frames[i];
+      if (f && prev && f !== prev) out.push(w.start + i * w.frameDur);
+      if (f) prev = f;
+    }
+  }
+  return out.sort((a, b) => a - b);
+}
+
+/**
+ * Cut speech into short units for voice fingerprints: a new unit starts at a
+ * pause, at a likely turn change, or when a unit reaches `maxLen` seconds.
+ * Returns [{ start, end, wordIdx: [...] }].
+ */
+export function speechUnits(words, cuts = [], { pause = 0.3, maxLen = 3 } = {}) {
+  const units = [];
+  let cur = null, ci = 0;
+  words.forEach((w, i) => {
+    while (ci < cuts.length && cuts[ci] <= w.start) ci++;
+    const crossed = cur && ci > 0 && cuts[ci - 1] > cur.end - 0.05 && cuts[ci - 1] <= w.start + 0.05;
+    if (!cur || w.start - cur.end > pause || crossed || w.end - cur.start > maxLen) {
+      cur = { start: w.start, end: w.end, wordIdx: [] };
+      units.push(cur);
+    }
+    cur.wordIdx.push(i);
+    cur.end = Math.max(cur.end, w.end);
+  });
+  return units;
+}
+
+const cosine = (a, b) => {
+  let d = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { d += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return d / (Math.sqrt(na * nb) || 1);
+};
+
+/**
+ * Group voice fingerprints by speaker: average-linkage agglomerative
+ * clustering on cosine similarity, merging while the closest pair of groups is
+ * more similar than `threshold`. `vectors` may contain nulls (too short to
+ * fingerprint); those get the label of the nearest unit in time.
+ * Returns one label (0..k-1, in order of first appearance) per unit.
+ */
+export function clusterVoices(vectors, { threshold = 0.5, maxSpeakers = 8 } = {}) {
+  const idx = vectors.map((v, i) => (v ? i : -1)).filter((i) => i >= 0);
+  if (!idx.length) return vectors.map(() => 0);
+  let groups = idx.map((i) => [i]);
+  const sim = new Map();
+  const key = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+  const pair = (a, b) => { const k = key(a, b); if (!sim.has(k)) sim.set(k, cosine(vectors[a], vectors[b])); return sim.get(k); };
+  const link = (g, h) => { let s = 0; for (const a of g) for (const b of h) s += pair(a, b); return s / (g.length * h.length); };
+  while (groups.length > 1) {
+    let best = -Infinity, bi = 0, bj = 1;
+    for (let i = 0; i < groups.length; i++) for (let j = i + 1; j < groups.length; j++) {
+      const s = link(groups[i], groups[j]);
+      if (s > best) { best = s; bi = i; bj = j; }
+    }
+    if (best < threshold && groups.length <= maxSpeakers) break;
+    groups[bi] = groups[bi].concat(groups[bj]);
+    groups.splice(bj, 1);
+  }
+  const label = new Array(vectors.length).fill(-1);
+  groups.sort((g, h) => Math.min(...g) - Math.min(...h)).forEach((g, k) => g.forEach((i) => (label[i] = k)));
+  for (let i = 0; i < label.length; i++) {
+    if (label[i] >= 0) continue;
+    let d = 1;
+    while (label[i] < 0 && d < label.length) {
+      if (i - d >= 0 && label[i - d] >= 0) label[i] = label[i - d];
+      else if (i + d < label.length && label[i + d] >= 0) label[i] = label[i + d];
+      d++;
+    }
+    if (label[i] < 0) label[i] = 0;
+  }
+  return label;
+}
+
+/** Units + labels -> speaker segments for assignSpeakers({ powerset: false }). */
+export function unitsToSegments(units, labels) {
+  return units.map((u, i) => ({ id: labels[i] + 1, start: u.start, end: u.end }));
 }
 
 /** Keep `cast` in step with the speakers words actually use. Existing names and colors are kept. */

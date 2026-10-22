@@ -1,7 +1,8 @@
 import { wordFeatures, wordFeaturesAsync, envelope } from './audio.js';
 import { decodeFile, captureByPlayback, unlockAudio, audioContext } from './audio-decode.js';
 import {
-  wordsFromWhisper, parseCues, wordsFromCues, assignSpeakers, analyze, fromCWIDocument, SPEAKER_COLORS, CWI, stitchDiarization,
+  wordsFromWhisper, parseCues, wordsFromCues, assignSpeakers, analyze, fromCWIDocument, SPEAKER_COLORS, CWI,
+  changePoints, speechUnits, clusterVoices, unitsToSegments,
 } from './cwi.js';
 import { drawCaptions, DEFAULT_SETTINGS, MOTIONS } from './renderer.js';
 import { FONTS, getFont, ensureFont, cssUrl, familyStack } from './fonts.js';
@@ -40,65 +41,66 @@ function saveSettings() {
   try { localStorage.setItem('rc-cwi-settings', JSON.stringify(state.settings)); } catch {}
 }
 
-// ------------------------------------------------------------------ worker
-let worker = null;
-let reqId = 0;
-const pending = new Map();
-// Watchdog. The worker sends a heartbeat every 2 s with the bytes it has
-// received. A download is stalled only if bytes stop arriving for 60 s; the
-// worker is dead (e.g. the OS killed it for memory) if heartbeats stop.
-let lastBeat = 0;
-let lastBytes = 0;
-let bytesSeen = -1;
-let downloading = false;
+// ------------------------------------------------------------------ workers
+// Each worker sends a heartbeat every 2 s with the bytes it has received. A
+// download counts as stalled only if bytes stop arriving for 60 s; a worker is
+// dead (e.g. the OS killed it for memory) if its heartbeats stop.
 class StallError extends Error {}
-function killWorker(err) {
-  if (worker) { worker.terminate(); worker = null; }
-  for (const { reject } of pending.values()) reject(err);
-  pending.clear();
-}
-setInterval(() => {
-  if (!pending.size || document.hidden) return;
-  const now = performance.now();
-  if (downloading && now - lastBytes > 60000) {
-    killWorker(new StallError('The model download stopped. Check your connection and try again.'));
-  } else if (now - lastBeat > 240000) {
-    killWorker(new Error('Processing stopped responding. Try the Fast accuracy option or a shorter clip.'));
+let reqId = 0;
+class WorkerClient {
+  constructor(url) { this.url = url; this.w = null; this.pending = new Map(); this.lastBeat = 0; this.lastBytes = 0; this.bytesSeen = -1; this.downloading = false; }
+  get busy() { return this.pending.size > 0; }
+  start() {
+    if (this.w) return this.w;
+    this.w = new Worker(this.url, { type: 'module' });
+    this.w.onmessage = ({ data }) => {
+      this.lastBeat = performance.now();
+      if (data.type === 'beat') {
+        this.downloading = data.open > 0;
+        if (data.bytes !== this.bytesSeen) { this.bytesSeen = data.bytes; this.lastBytes = this.lastBeat; }
+        return;
+      }
+      if (data.id && this.pending.has(data.id)) {
+        const { resolve, reject } = this.pending.get(data.id);
+        this.pending.delete(data.id);
+        data.type === 'error' ? reject(new Error(data.message)) : resolve(data);
+        return;
+      }
+      onWorkerEvent(data);
+    };
+    this.w.onerror = (e) => { e.preventDefault?.(); this.kill(new Error(e.message || 'The models could not start in this browser.')); };
+    return this.w;
   }
-}, 3000);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) lastBeat = lastBytes = performance.now(); });
-function getWorker() {
-  if (worker) return worker;
-  worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
-  worker.onmessage = ({ data }) => {
-    lastBeat = performance.now();
-    if (data.type === 'beat') {
-      downloading = data.open > 0;
-      if (data.bytes !== bytesSeen) { bytesSeen = data.bytes; lastBytes = lastBeat; }
-      return;
-    }
-    if (data.id && pending.has(data.id)) {
-      const { resolve, reject } = pending.get(data.id);
-      pending.delete(data.id);
-      data.type === 'error' ? reject(new Error(data.message)) : resolve(data);
-      return;
-    }
-    onWorkerEvent(data);
-  };
-  worker.onerror = (e) => {
-    e.preventDefault?.();
-    killWorker(new Error(e.message || 'The models could not start in this browser.'));
-  };
-  return worker;
+  ask(msg, transfer) {
+    const id = ++reqId;
+    this.lastBeat = this.lastBytes = performance.now();
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      this.start().postMessage({ ...msg, id }, transfer || []);
+    });
+  }
+  kill(err) {
+    if (this.w) { this.w.terminate(); this.w = null; }
+    for (const { reject } of this.pending.values()) reject(err);
+    this.pending.clear();
+  }
+  /** Free memory when idle (models reload from the browser cache next time). */
+  release() { if (this.w && !this.busy) { this.w.terminate(); this.w = null; } }
+  check(now) {
+    if (!this.busy) return;
+    if (this.downloading && now - this.lastBytes > 60000) this.kill(new StallError('The model download stopped. Check your connection and try again.'));
+    else if (now - this.lastBeat > 240000) this.kill(new Error('Processing stopped responding. Try the Fast accuracy option or a shorter clip.'));
+  }
 }
-function ask(msg, transfer) {
-  const id = ++reqId;
-  lastBeat = lastBytes = performance.now();
-  return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    getWorker().postMessage({ ...msg, id }, transfer || []);
-  });
-}
+const models = new WorkerClient(new URL('./worker.js', import.meta.url));
+const voices = new WorkerClient(new URL('./speaker-worker.js', import.meta.url));
+const ask = (msg, transfer) => models.ask(msg, transfer);
+function killWorker(err) { models.kill(err); voices.kill(err); }
+setInterval(() => { if (!document.hidden) { const now = performance.now(); models.check(now); voices.check(now); } }, 3000);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  for (const c of [models, voices]) c.lastBeat = c.lastBytes = performance.now();
+});
 
 // ------------------------------------------------------------------ keep the phone awake
 let wakeLock = null;
@@ -126,6 +128,7 @@ function onWorkerEvent(d) {
     if (total > 0) work(null, loaded / total, `Downloading the ${d.kind} model, ${mb(loaded)} of ${mb(total)}. This happens once.`);
   } else if (d.type === 'transcribe-progress') work(null, d.total ? d.done / d.total : null, '');
   else if (d.type === 'diarize-progress') work(null, d.total ? d.done / d.total : null, '');
+  else if (d.type === 'embed-progress') work('Telling voices apart…', d.total ? d.done / d.total : null, '');
   else if (d.type === 'partial') {
     // Show words as they arrive so people see it working.
     state.project = analyze({ words: wordsFromWhisper(d.chunks), cast: [] }, state.settings);
@@ -203,6 +206,37 @@ function listenWithTap(signal) {
     ]);
   });
 }
+
+/**
+ * Who said what: the segmentation model marks likely turn changes, speech is
+ * cut into short units, each unit gets a voice fingerprint, and fingerprints
+ * that sound alike are grouped into one speaker.
+ */
+async function detectSpeakers(words, signal) {
+  let cuts = [];
+  try {
+    const seg = await withRetry(() => {
+      const samples = state.audio.samples.slice();
+      return ask({ type: 'diarize', samples }, [samples.buffer]);
+    }, signal);
+    cuts = changePoints(seg.windows);
+  } catch (e) {
+    if (e?.name === 'AbortError') throw e;
+    console.warn('Segmentation failed; using pauses only', e);
+  }
+  if (isPhone()) models.release(); // free Whisper's memory before the next model loads
+  const units = speechUnits(words, cuts);
+  const res = await withRetry(() => {
+    const samples = state.audio.samples.slice();
+    return voices.ask({ type: 'embed', samples, units: units.map(({ start, end }) => ({ start, end })) }, [samples.buffer]);
+  }, signal);
+  const labels = clusterVoices(res.vectors, { threshold: VOICE_THRESHOLD });
+  assignSpeakers(words, unitsToSegments(units, labels), { powerset: false, minShare: 0, minWords: 1 });
+  state.voiceDebug = { units: units.length, fingerprinted: res.vectors.filter(Boolean).length, speakers: new Set(labels).size };
+}
+// Same-voice fingerprints from CAM++ typically score above ~0.6 and different
+// voices below ~0.3 (cosine). 0.45 sits between, leaning toward fewer speakers.
+const VOICE_THRESHOLD = 0.45;
 
 /** Retry a model step when its download stalls (mobile data drops out). */
 async function withRetry(fn, signal, tries = 3) {
@@ -286,12 +320,7 @@ async function openFile(file) {
       const named = words.some((w) => w.speakerName);
       if ($('#speakerMode').value === 'auto' && !named) {
         try {
-          downloads.clear();
-          const res = await withRetry(() => {
-            const samples = state.audio.samples.slice();
-            return ask({ type: 'diarize', samples }, [samples.buffer]);
-          }, ctrl.signal);
-          assignSpeakers(words, stitchDiarization(res.windows), { powerset: false });
+          await detectSpeakers(words, ctrl.signal);
         } catch (e) {
           if (e?.name === 'AbortError') throw e;
           console.error(e);
@@ -321,7 +350,7 @@ async function openFile(file) {
     state.abort = null;
     allowSleep();
     // Phones: free the models' memory for editing and export (they reload from cache).
-    if (isPhone() && worker && !pending.size) { worker.terminate(); worker = null; }
+    if (isPhone()) { models.release(); voices.release(); }
   }
 }
 
@@ -893,4 +922,4 @@ document.fonts?.ready.then(draw);
 window.addEventListener('beforeunload', (e) => { if (state.busy) { e.preventDefault(); e.returnValue = ''; } });
 
 // Test hook for the browser tests.
-window.__rc = { state, openFile, reanalyze, refresh, killWorker };
+window.__rc = { state, openFile, reanalyze, refresh, killWorker, voices, models };

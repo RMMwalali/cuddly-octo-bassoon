@@ -1,0 +1,5 @@
+test/
+scripts/
+.github/
+node_modules/
+*.md

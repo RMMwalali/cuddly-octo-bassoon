@@ -54,7 +54,9 @@ It is a static site with no build step and no server, so any static host works. 
 
 - **Vercel:** in vercel.com choose **Add New → Project**, import this repository, keep the framework preset **Other** with no build command and output directory `.`, and deploy. `vercel.json` adds sensible headers.
 - **Netlify / Cloudflare Pages:** connect the repository, leave the build command empty, publish directory `.`.
-- **GitHub Pages:** pushing to `main` runs the tests and publishes the site. Turn it on once under **Settings → Pages → Source: GitHub Actions**.
+- **GitHub Pages:** under **Settings → Pages**, choose **Deploy from a branch**, `main`, `/ (root)`.
+
+Pushing to `main` runs the tests on GitHub Actions.
 
 The site must be served over HTTPS (all of these do), because browsers only allow module workers, the model cache and the screen wake lock on secure pages.
 

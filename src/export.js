@@ -148,7 +148,8 @@ export function primeVideo(srcUrl) {
   video.preload = 'auto';
   video.src = srcUrl;
   const p = video.play();
-  if (p) p.then(() => video.pause()).catch(() => {});
+  // burnIn waits for this, so the unlock's pause() can never land after the real play().
+  video.__primed = p ? p.then(() => video.pause(), () => {}) : Promise.resolve();
   return video;
 }
 
@@ -214,6 +215,7 @@ export async function burnIn(video, actx, draw, { onProgress, signal, maxSide = 
   video.onended = () => stop();
 
   try {
+    await Promise.race([video.__primed, new Promise((r) => setTimeout(r, 3000))]);
     video.currentTime = 0;
     paint();
     rec.start(1000);

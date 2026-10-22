@@ -12,6 +12,27 @@ import {
 
 env.allowLocalModels = false;
 
+// Count the bytes that actually arrive, so the page can tell a slow download
+// from a stalled one. (Progress events alone can pause while bytes still flow.)
+let openDownloads = 0;
+let bytesIn = 0;
+const baseFetch = env.fetch || fetch;
+env.fetch = async (url, opts) => {
+  const res = await baseFetch(url, opts);
+  if (!res.body || typeof TransformStream === 'undefined') return res;
+  openDownloads++;
+  let closed = false;
+  const close = () => { if (!closed) { closed = true; openDownloads--; } };
+  const counter = new TransformStream({
+    transform(chunk, ctrl) { bytesIn += chunk.byteLength; ctrl.enqueue(chunk); },
+    flush: close,
+  });
+  const body = res.body.pipeThrough(counter);
+  body.closed?.catch?.(close);
+  return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
+};
+setInterval(() => self.postMessage({ type: 'beat', open: openDownloads, bytes: bytesIn }), 2000);
+
 const SR = 16000;
 let asr = null;
 let asrModel = null;

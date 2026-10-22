@@ -323,7 +323,7 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
   input, select, textarea { font-size: 16px !important; }
   .btn.small { min-height: 40px; padding: 8px 14px; }
   .seg button { min-height: 40px; }
-  .chip { padding: 6px 7px; min-height: 36px; }
+  .chip { padding: 6px 7px; min-height: 36px; min-width: 36px; }
   .chips { gap: 4px; }
   .swatch { width: 34px; height: 34px; }
   .swatches { gap: 10px; }

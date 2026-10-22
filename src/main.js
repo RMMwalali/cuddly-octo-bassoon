@@ -44,10 +44,14 @@ function saveSettings() {
 let worker = null;
 let reqId = 0;
 const pending = new Map();
-// Watchdog: a stalled download or a worker the OS killed for memory sends
-// nothing, so without this the app would wait forever.
+// Watchdog. The worker sends a heartbeat every 2 s with the bytes it has
+// received. A download is stalled only if bytes stop arriving for 60 s; the
+// worker is dead (e.g. the OS killed it for memory) if heartbeats stop.
 let lastBeat = 0;
-let phase = 'run';
+let lastBytes = 0;
+let bytesSeen = -1;
+let downloading = false;
+class StallError extends Error {}
 function killWorker(err) {
   if (worker) { worker.terminate(); worker = null; }
   for (const { reject } of pending.values()) reject(err);
@@ -55,19 +59,24 @@ function killWorker(err) {
 }
 setInterval(() => {
   if (!pending.size || document.hidden) return;
-  const limit = phase === 'download' ? 45000 : 240000;
-  if (performance.now() - lastBeat > limit) {
-    killWorker(new Error(phase === 'download'
-      ? 'The model download stopped. Check your connection and try again.'
-      : 'Processing stopped responding. Try the Fast accuracy option or a shorter clip.'));
+  const now = performance.now();
+  if (downloading && now - lastBytes > 60000) {
+    killWorker(new StallError('The model download stopped. Check your connection and try again.'));
+  } else if (now - lastBeat > 240000) {
+    killWorker(new Error('Processing stopped responding. Try the Fast accuracy option or a shorter clip.'));
   }
 }, 3000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) lastBeat = lastBytes = performance.now(); });
 function getWorker() {
   if (worker) return worker;
   worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
   worker.onmessage = ({ data }) => {
     lastBeat = performance.now();
-    phase = data.type === 'download' && data.status !== 'done' ? 'download' : 'run';
+    if (data.type === 'beat') {
+      downloading = data.open > 0;
+      if (data.bytes !== bytesSeen) { bytesSeen = data.bytes; lastBytes = lastBeat; }
+      return;
+    }
     if (data.id && pending.has(data.id)) {
       const { resolve, reject } = pending.get(data.id);
       pending.delete(data.id);
@@ -84,8 +93,7 @@ function getWorker() {
 }
 function ask(msg, transfer) {
   const id = ++reqId;
-  lastBeat = performance.now();
-  phase = 'run';
+  lastBeat = lastBytes = performance.now();
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
     getWorker().postMessage({ ...msg, id }, transfer || []);
@@ -196,6 +204,19 @@ function listenWithTap(signal) {
   });
 }
 
+/** Retry a model step when its download stalls (mobile data drops out). */
+async function withRetry(fn, signal, tries = 3) {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (!(e instanceof StallError) || i >= tries || signal.aborted) throw e;
+      work('Connection dropped. Trying the download again…', null, `Attempt ${i + 1} of ${tries}.`);
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+}
+
 async function openFile(file) {
   if (!file) return;
   if (/\.(srt|vtt|json)$/i.test(file.name)) return setSubs(file);
@@ -253,8 +274,10 @@ async function openFile(file) {
       } else {
         work('Loading speech model…', null, '');
         downloads.clear();
-        const samples = state.audio.samples.slice();
-        const res = await ask({ type: 'transcribe', samples, model: $('#model').value, language: $('#language').value }, [samples.buffer]);
+        const res = await withRetry(() => {
+          const samples = state.audio.samples.slice();
+          return ask({ type: 'transcribe', samples, model: $('#model').value, language: $('#language').value }, [samples.buffer]);
+        }, ctrl.signal);
         words = wordsFromWhisper(res.chunks);
         if (!words.length) throw new Error('No speech was found in this video.');
         state.language = $('#language').value === 'auto' ? null : $('#language').value;
@@ -264,8 +287,10 @@ async function openFile(file) {
       if ($('#speakerMode').value === 'auto' && !named) {
         try {
           downloads.clear();
-          const samples = state.audio.samples.slice();
-          const res = await ask({ type: 'diarize', samples }, [samples.buffer]);
+          const res = await withRetry(() => {
+            const samples = state.audio.samples.slice();
+            return ask({ type: 'diarize', samples }, [samples.buffer]);
+          }, ctrl.signal);
           assignSpeakers(words, stitchDiarization(res.windows), { powerset: false });
         } catch (e) {
           if (e?.name === 'AbortError') throw e;
@@ -833,6 +858,7 @@ async function exportVideo(exportEl) {
     const name = `${baseName()}-captioned.${ext}`;
     if (phone) {
       // Sharing needs a fresh tap, so offer it as a button.
+      allowSleep();
       work('Your video is ready', 1, ext === 'mp4' ? `${mb(blob.size)}, MP4.` : `${mb(blob.size)}, WebM. If an app won't take it, convert it to MP4.`);
       await new Promise((resolve) => workButtons([
         { label: 'Save or share', primary: true, onClick: async () => { await saveVideo(name, blob); resolve(); } },

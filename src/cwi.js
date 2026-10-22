@@ -281,7 +281,8 @@ export function changePoints(windows) {
 
 /**
  * Cut speech into short units for voice fingerprints: a new unit starts at a
- * pause, at a likely turn change, or when a unit reaches `maxLen` seconds.
+ * pause, at a sentence end, at a likely turn change, or when a unit reaches
+ * `maxLen` seconds. (Speakers usually change at sentence ends.)
  * Returns [{ start, end, wordIdx: [...] }].
  */
 export function speechUnits(words, cuts = [], { pause = 0.3, maxLen = 3 } = {}) {
@@ -290,7 +291,9 @@ export function speechUnits(words, cuts = [], { pause = 0.3, maxLen = 3 } = {}) 
   words.forEach((w, i) => {
     while (ci < cuts.length && cuts[ci] <= w.start) ci++;
     const crossed = cur && ci > 0 && cuts[ci - 1] > cur.end - 0.05 && cuts[ci - 1] <= w.start + 0.05;
-    if (!cur || w.start - cur.end > pause || crossed || w.end - cur.start > maxLen) {
+    const prev = words[i - 1];
+    const sentenceEnd = prev && /[.?!…]["')\]]?$/.test(prev.text);
+    if (!cur || w.start - cur.end > pause || crossed || sentenceEnd || w.end - cur.start > maxLen) {
       cur = { start: w.start, end: w.end, wordIdx: [] };
       units.push(cur);
     }
@@ -313,7 +316,7 @@ const cosine = (a, b) => {
  * fingerprint); those get the label of the nearest unit in time.
  * Returns one label (0..k-1, in order of first appearance) per unit.
  */
-export function clusterVoices(vectors, { threshold = 0.5, maxSpeakers = 8 } = {}) {
+export function clusterVoices(vectors, { threshold = 0.5, maxSpeakers = 8, exactly = null } = {}) {
   const idx = vectors.map((v, i) => (v ? i : -1)).filter((i) => i >= 0);
   if (!idx.length) return vectors.map(() => 0);
   let groups = idx.map((i) => [i]);
@@ -327,7 +330,7 @@ export function clusterVoices(vectors, { threshold = 0.5, maxSpeakers = 8 } = {}
       const s = link(groups[i], groups[j]);
       if (s > best) { best = s; bi = i; bj = j; }
     }
-    if (best < threshold && groups.length <= maxSpeakers) break;
+    if (exactly ? groups.length <= exactly : best < threshold && groups.length <= maxSpeakers) break;
     groups[bi] = groups[bi].concat(groups[bj]);
     groups.splice(bj, 1);
   }
@@ -344,6 +347,42 @@ export function clusterVoices(vectors, { threshold = 0.5, maxSpeakers = 8 } = {}
     if (label[i] < 0) label[i] = 0;
   }
   return label;
+}
+
+const normalize = (v) => { let n = 0; for (const a of v) n += a * a; n = Math.sqrt(n) || 1; return Array.from(v, (a) => a / n); };
+
+/**
+ * Who is speaking, in two passes.
+ * 1. Plain fingerprints with a strict threshold decide whether there is more
+ *    than one voice at all, so a solo video is never split up.
+ * 2. Fingerprints share a large "same recording" component that hides the
+ *    differences between voices. Subtract the average of the pass-1 voices
+ *    (each voice weighted equally, so one dominant talker doesn't skew it) and
+ *    group again, into `speakers` groups if the creator said how many.
+ */
+export function groupVoices(vectors, { speakers = null, first = 0.5, second = 0.0 } = {}) {
+  const has = vectors.some(Boolean);
+  if (!has) return vectors.map(() => 0);
+  if (speakers === 1) return vectors.map(() => 0);
+  const pass1 = clusterVoices(vectors, { threshold: first });
+  const k1 = new Set(pass1).size;
+  if (!speakers && k1 < 2) return pass1;
+  // Balanced background: mean of the pass-1 group centroids.
+  const dim = vectors.find(Boolean).length;
+  const cents = new Map();
+  vectors.forEach((v, i) => {
+    if (!v) return;
+    const c = cents.get(pass1[i]) || { sum: new Float64Array(dim), n: 0 };
+    for (let d = 0; d < dim; d++) c.sum[d] += v[d];
+    c.n++;
+    cents.set(pass1[i], c);
+  });
+  const bg = new Float64Array(dim);
+  for (const c of cents.values()) for (let d = 0; d < dim; d++) bg[d] += c.sum[d] / c.n / cents.size;
+  const centered = vectors.map((v) => v && normalize(Array.from(v, (a, d) => a - bg[d])));
+  return speakers
+    ? clusterVoices(centered, { threshold: -Infinity, maxSpeakers: speakers, exactly: speakers })
+    : clusterVoices(centered, { threshold: second, maxSpeakers: Math.max(2, k1 + 2) });
 }
 
 /** Units + labels -> speaker segments for assignSpeakers({ powerset: false }). */

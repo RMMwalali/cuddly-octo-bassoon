@@ -9,7 +9,7 @@ import { fbank } from './fbank.js';
 const MODEL_URL = 'https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/wespeaker_en_voxceleb_CAM%2B%2B.onnx';
 const CACHE = 'rc-models-v1';
 const SR = 16000;
-const MIN_SECONDS = 1.0;
+const MIN_SECONDS = 0.7;
 
 ort.env.wasm.numThreads = 1; // no SharedArrayBuffer on static hosts without COOP/COEP
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
@@ -69,8 +69,8 @@ async function embed({ samples, units }) {
     if (u.end - u.start < MIN_SECONDS) { vectors.push(null); continue; }
     const a = Math.max(0, Math.floor((u.start - 0.05) * SR));
     const b = Math.min(samples.length, Math.ceil((u.end + 0.05) * SR));
-    const feats = fbank(samples.subarray(a, b));
-    if (feats.frames < 50) { vectors.push(null); continue; }
+    const feats = fbank(samples.subarray(a, b), { window: 'hamming' }); // WeSpeaker's training features
+    if (feats.frames < 40) { vectors.push(null); continue; }
     const input = new ort.Tensor('float32', feats.data, [1, feats.frames, feats.bins]);
     const out = await s.run({ [inName]: input });
     const v = Float32Array.from(out[outName].data);

@@ -2,7 +2,7 @@ import { wordFeatures, wordFeaturesAsync, envelope } from './audio.js';
 import { decodeFile, captureByPlayback, unlockAudio, audioContext } from './audio-decode.js';
 import {
   wordsFromWhisper, parseCues, wordsFromCues, assignSpeakers, analyze, fromCWIDocument, SPEAKER_COLORS, CWI,
-  changePoints, speechUnits, clusterVoices, unitsToSegments, clampWords,
+  changePoints, speechUnits, groupVoices, unitsToSegments, clampWords,
 } from './cwi.js';
 import { drawCaptions, DEFAULT_SETTINGS, MOTIONS } from './renderer.js';
 import { FONTS, getFont, ensureFont, cssUrl, familyStack } from './fonts.js';
@@ -230,13 +230,16 @@ async function detectSpeakers(words, signal) {
     const samples = state.audio.samples.slice();
     return voices.ask({ type: 'embed', samples, units: units.map(({ start, end }) => ({ start, end })) }, [samples.buffer]);
   }, signal);
-  const labels = clusterVoices(res.vectors, { threshold: VOICE_THRESHOLD });
+  const mode = $('#speakerMode').value;
+  const labels = groupVoices(res.vectors, { speakers: mode === 'auto' ? null : Number(mode), first: VOICE_SPLIT, second: VOICE_REGROUP });
   assignSpeakers(words, unitsToSegments(units, labels), { powerset: false, minShare: 0, minWords: 1 });
   state.voiceDebug = { units: units.length, fingerprinted: res.vectors.filter(Boolean).length, speakers: new Set(labels).size };
 }
-// Same-voice fingerprints from CAM++ typically score above ~0.6 and different
-// voices below ~0.3 (cosine). 0.45 sits between, leaning toward fewer speakers.
-const VOICE_THRESHOLD = 0.45;
+// Calibrated on real recordings (an interview, a film scene, studio speech):
+// pass 1 needs plain fingerprints below 0.55 similarity before it believes
+// there is a second voice; pass 2 groups the recording-neutral prints at 0.
+const VOICE_SPLIT = 0.55;
+const VOICE_REGROUP = 0.0;
 
 /** Retry a model step when its download stalls (mobile data drops out). */
 async function withRetry(fn, signal, tries = 3) {
@@ -315,10 +318,10 @@ async function openFile(file) {
         words = clampWords(wordsFromWhisper(res.chunks), state.audio.duration);
         if (!words.length) throw new Error('No speech was found in this video.');
         state.language = $('#language').value === 'auto' ? null : $('#language').value;
-        state.source = $('#speakerMode').value === 'auto' ? 'browser-whisper+pyannote' : 'browser-whisper';
+        state.source = $('#speakerMode').value !== '1' ? 'browser-whisper+wespeaker' : 'browser-whisper';
       }
       const named = words.some((w) => w.speakerName);
-      if ($('#speakerMode').value === 'auto' && !named) {
+      if ($('#speakerMode').value !== '1' && !named) {
         try {
           await detectSpeakers(words, ctrl.signal);
         } catch (e) {

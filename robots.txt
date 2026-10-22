@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://reactivecaptions.vercel.app/sitemap.xml

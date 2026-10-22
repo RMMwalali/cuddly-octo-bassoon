@@ -4,8 +4,42 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#17161f" />
-  <title>Reactive Captions</title>
-  <meta name="description" content="Automatic Caption with Intention captions: speaker colors, word-by-word timing, and type that follows pitch and volume. Runs in your browser." />
+  <title>Reactive Captions: free expressive captions for your videos</title>
+  <meta name="description" content="Free auto captions that show how things are said: speaker colors, words that light up as they're spoken, and type that follows the voice. Works on your phone." />
+  <link rel="canonical" href="https://reactivecaptions.vercel.app/" />
+  <meta name="robots" content="index, follow" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Reactive Captions" />
+  <meta property="og:title" content="Reactive Captions: captions that sound like the people speaking" />
+  <meta property="og:description" content="Free expressive auto captions. Speaker colors, words that light up as they're said, and type that follows the voice. Runs on your phone; nothing is uploaded." />
+  <meta property="og:url" content="https://reactivecaptions.vercel.app/" />
+  <meta property="og:image" content="https://reactivecaptions.vercel.app/og.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="Animated captions in two speaker colors, with louder words bigger and bolder" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Reactive Captions: captions that sound like the people speaking" />
+  <meta name="twitter:description" content="Free expressive auto captions with speaker colors and words that react to the voice." />
+  <meta name="twitter:image" content="https://reactivecaptions.vercel.app/og.png" />
+  <link rel="icon" type="image/png" href="favicon.png" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Captions" />
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebApplication",
+    "name": "Reactive Captions",
+    "url": "https://reactivecaptions.vercel.app/",
+    "applicationCategory": "MultimediaApplication",
+    "operatingSystem": "Any (runs in the web browser)",
+    "description": "Expressive automatic captions for videos: speaker colors, word-by-word timing, and typography that follows pitch and volume, inspired by the Caption with Intention design system. Runs on the device; videos are not uploaded.",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD", "description": "Free to try" },
+    "featureList": ["Automatic transcription in many languages including English and Swahili", "Speaker colors", "Word-by-word animated captions", "Pitch and volume styling", "3D caption styles", "Export burned-in video, SRT, VTT, ASS"],
+    "inLanguage": "en"
+  }
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Roboto+Flex:opsz,wght@8..144,100..1000&display=swap" />
@@ -80,6 +114,34 @@
             </div>
           </details>
           <p class="privacy">Nothing is uploaded. The speech and speaker models download once and are cached by your browser.</p>
+          <section class="about" aria-labelledby="aboutTitle">
+            <h2 id="aboutTitle">What makes these captions different</h2>
+            <p>Most auto captions only show <em>what</em> was said. Reactive Captions also shows <em>how</em>: who is speaking, when each word lands, and how loud or soft it was. It follows the ideas of <a href="https://www.captionwithintention.org/" rel="noopener">Caption with Intention</a>, an award-winning caption design system made with the Deaf and hard-of-hearing community.</p>
+            <details>
+              <summary>Is it free? Do I need to sign up?</summary>
+              <p>You can try it free, with no account. Open the page, choose a video and you have captions in under a minute once the models are downloaded.</p>
+            </details>
+            <details>
+              <summary>Is my video uploaded anywhere?</summary>
+              <p>No. Transcription, speaker detection and rendering all happen on your own phone or computer. Your video never leaves the device.</p>
+            </details>
+            <details>
+              <summary>Does it work on iPhone and Android?</summary>
+              <p>Yes, in Safari and Chrome. The first video downloads the speech model (about 80 MB, so use Wi-Fi), after which it is cached. Clips under 2 minutes work best on phones.</p>
+            </details>
+            <details>
+              <summary>Which languages does it understand?</summary>
+              <p>English, Swahili, French, Arabic, Spanish, Portuguese, Hindi, German and many more. Pick the language under Options for the best accuracy.</p>
+            </details>
+            <details>
+              <summary>Can I post the result on TikTok, Reels, YouTube Shorts or WhatsApp?</summary>
+              <p>Yes. Export the video with captions burned in, or export an .srt subtitle file to upload separately.</p>
+            </details>
+            <details>
+              <summary>Are you part of Caption with Intention?</summary>
+              <p>No. Reactive Captions is an independent tool inspired by the Caption with Intention design system from the Chicago Hearing Society. It is not affiliated with or endorsed by them.</p>
+            </details>
+          </section>
         </div>
       </div>
 

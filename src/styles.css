@@ -97,6 +97,13 @@ button, input, select { font: inherit; color: inherit; }
 .drop p { color: var(--muted); margin: 0 auto 24px; max-width: 44ch; }
 .who-talks { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 0 0 16px; font-weight: 600; }
 .who-talks select { font-weight: 600; }
+.about { margin: 36px auto 0; text-align: left; max-width: 520px; border-top: 1px solid var(--line); padding-top: 24px; }
+.about h2 { font-size: 22px; letter-spacing: -0.01em; margin: 0 0 10px; font-weight: 800; }
+.about p { color: var(--muted); margin: 0 0 12px; max-width: none; }
+.about a { color: var(--text); }
+.about details { border-top: 1px solid var(--line); }
+.about summary { cursor: pointer; padding: 12px 0; font-weight: 600; }
+.about details p { margin: 0 0 14px; }
 .drop .privacy { font-size: 13px; margin-top: 24px; }
 .drop-options { margin-top: 22px; text-align: left; border: 1px solid var(--line); border-radius: var(--r-md); }
 .drop-options summary { cursor: pointer; padding: 10px 14px; font-weight: 600; }

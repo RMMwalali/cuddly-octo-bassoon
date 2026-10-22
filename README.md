@@ -50,6 +50,9 @@ Opening `index.html` directly from disk will not work, because browsers block mo
 
 ### Put it online
 
+When importing to Vercel, set the **Project Name** to `reactivecaptions` so the address is `reactivecaptions.vercel.app`, which the share previews, sitemap and canonical link already point to. If you use another address or your own domain, replace `reactivecaptions.vercel.app` in `index.html`, `robots.txt` and `sitemap.xml`.
+
+
 It is a static site with no build step and no server, so any static host works. The heavy lifting happens in each visitor's browser.
 
 - **Vercel:** in vercel.com choose **Add New → Project**, import this repository, keep the framework preset **Other** with no build command and output directory `.`, and deploy. `vercel.json` adds sensible headers.

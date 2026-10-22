@@ -1,5 +1,5 @@
 import { wordFeatures, wordFeaturesAsync, envelope } from './audio.js';
-import { decodeFile, captureByPlayback, unlockAudio, audioContext } from './audio-decode.js';
+import { decodeFile, captureByPlayback, unlockAudio, audioContext, playSamples } from './audio-decode.js';
 import {
   wordsFromWhisper, parseCues, wordsFromCues, assignSpeakers, analyze, fromCWIDocument, SPEAKER_COLORS, CWI,
   speechUnits, groupVoices, unitsToSegments, clampWords,
@@ -237,6 +237,74 @@ async function withRetry(fn, signal, tries = 3) {
   }
 }
 
+/** Transcribe (or use imported subtitles), find speakers, measure intonation. */
+async function captionFromAudio(signal) {
+  let words;
+  if (state.subs) {
+    words = wordsFromCues(parseCues(state.subs.text));
+    if (!words.length) throw new Error('No captions were found in that subtitle file.');
+    state.source = 'imported-subtitles+browser-prosody';
+  } else {
+    work('Loading speech model…', null, '');
+    downloads.clear();
+    const res = await withRetry(() => {
+      const samples = state.audio.samples.slice();
+      return ask({ type: 'transcribe', samples, model: $('#model').value, language: $('#language').value }, [samples.buffer]);
+    }, signal);
+    words = clampWords(wordsFromWhisper(res.chunks), state.audio.duration);
+    if (!words.length) throw new Error('No speech was found in this video.');
+    state.language = $('#language').value === 'auto' ? null : $('#language').value;
+    state.source = $('#speakerMode').value !== '1' ? 'browser-whisper+wespeaker' : 'browser-whisper';
+    state.modelUsed = $('#model').value;
+  }
+  const named = words.some((w) => w.speakerName);
+  if ($('#speakerMode').value !== '1' && !named) {
+    try {
+      await detectSpeakers(words, signal);
+    } catch (e) {
+      if (e?.name === 'AbortError') throw e;
+      console.error(e);
+      toast(`Speaker detection didn't work (${friendlyError(e)}). Everyone is one speaker for now; you can reassign lines in Words.`, true, 9000);
+    }
+  }
+  work('Measuring pitch and volume…', 0, '');
+  const feats = await wordFeaturesAsync(words, state.audio.samples, state.audio.sampleRate, (f) => work(null, f));
+  words.forEach((w, i) => (w.f = feats[i]));
+  state.project = analyze({ words, cast: [] }, state.settings);
+}
+
+/** "Words look wrong?": run the speech step again with another model or language. */
+async function redoCaptions() {
+  if (state.busy || !state.audio) return;
+  $('#redoModel') && ($('#model').value = $('#redoModel').value);
+  $('#redoLanguage') && ($('#language').value = $('#redoLanguage').value);
+  state.busy = true;
+  const ctrl = new AbortController();
+  state.abort = ctrl;
+  ctrl.signal.addEventListener('abort', () => killWorker(new DOMException('Cancelled', 'AbortError')));
+  keepAwake();
+  const keepSubs = state.subs;
+  state.subs = null;
+  try {
+    workButtons([{ label: 'Cancel', onClick: () => ctrl.abort() }]);
+    await captionFromAudio(ctrl.signal);
+    workDone();
+    $('#exportBtn').disabled = false;
+    selectWord(null);
+    refresh();
+    toast('Captions redone.');
+  } catch (e) {
+    workDone();
+    if (e?.name !== 'AbortError') toast(friendlyError(e), true, 9000);
+  } finally {
+    state.subs = keepSubs;
+    state.busy = false;
+    state.abort = null;
+    allowSleep();
+    if (isPhone()) { models.release(); voices.release(); }
+  }
+}
+
 async function openFile(file) {
   if (!file) return;
   if (/\.(srt|vtt|json)$/i.test(file.name)) return setSubs(file);
@@ -269,10 +337,10 @@ async function openFile(file) {
     }
     work('Reading audio…', null, '');
     try {
-      state.audio = await decodeFile(file);
+      state.audio = await decodeFile(file, video.duration);
     } catch (e) {
       if (/memory|allocation|Array buffer/i.test(e?.message || '')) throw e;
-      console.warn('decodeAudioData failed, falling back to playback capture', e);
+      console.warn('Direct audio decoding failed or looked wrong; falling back to playback capture', e);
       state.audio = await listenWithTap(ctrl.signal);
       workButtons([{ label: 'Cancel', onClick: () => ctrl.abort() }]);
     }
@@ -286,37 +354,7 @@ async function openFile(file) {
       state.source = JSON.parse(state.subs.text).metadata?.extractor_backend || 'imported-cwi';
       analyze(state.project, state.settings);
     } else {
-      let words;
-      if (state.subs) {
-        words = wordsFromCues(parseCues(state.subs.text));
-        if (!words.length) throw new Error('No captions were found in that subtitle file.');
-        state.source = 'imported-subtitles+browser-prosody';
-      } else {
-        work('Loading speech model…', null, '');
-        downloads.clear();
-        const res = await withRetry(() => {
-          const samples = state.audio.samples.slice();
-          return ask({ type: 'transcribe', samples, model: $('#model').value, language: $('#language').value }, [samples.buffer]);
-        }, ctrl.signal);
-        words = clampWords(wordsFromWhisper(res.chunks), state.audio.duration);
-        if (!words.length) throw new Error('No speech was found in this video.');
-        state.language = $('#language').value === 'auto' ? null : $('#language').value;
-        state.source = $('#speakerMode').value !== '1' ? 'browser-whisper+wespeaker' : 'browser-whisper';
-      }
-      const named = words.some((w) => w.speakerName);
-      if ($('#speakerMode').value !== '1' && !named) {
-        try {
-          await detectSpeakers(words, ctrl.signal);
-        } catch (e) {
-          if (e?.name === 'AbortError') throw e;
-          console.error(e);
-          toast(`Speaker detection didn't work (${friendlyError(e)}). Everyone is one speaker for now; you can reassign lines in Words.`, true, 9000);
-        }
-      }
-      work('Measuring pitch and volume…', 0, '');
-      const feats = await wordFeaturesAsync(words, state.audio.samples, state.audio.sampleRate, (f) => work(null, f));
-      words.forEach((w, i) => (w.f = feats[i]));
-      state.project = analyze({ words, cast: [] }, state.settings);
+      await captionFromAudio(ctrl.signal);
     }
     workDone();
     $('#exportBtn').disabled = false;
@@ -539,6 +577,29 @@ $('#wordSize').addEventListener('change', () => editWord(() => {}));
 $('#wordEmphasis').addEventListener('change', (e) => editWord((w) => (w.manual.emphasis = e.target.checked)));
 $('#wordAuto').addEventListener('click', () => editWord((w) => (w.manual = {})));
 $('#wordDone').addEventListener('click', () => selectWord(null));
+
+// "Words look wrong?" panel
+let heard = null;
+$('#wrongBtn').addEventListener('click', () => {
+  const box = $('#wrongPanel');
+  box.hidden = !box.hidden;
+  if (box.hidden || !state.audio) return;
+  const i = state.audio.info || {};
+  const how = i.path === 'playback' ? 'by listening while it played' : 'directly from the file';
+  const len = `${(state.audio.duration || 0).toFixed(1)} s of audio from a ${(video.duration || 0).toFixed(1)} s video`;
+  const ch = i.channels ? `, ${i.channels} channel${i.channels > 1 ? 's' : ''}` : '';
+  const model = $('#model').selectedOptions[0]?.textContent.split(' (')[0] || '';
+  $('#wrongInfo').textContent = `The app heard ${len}${ch}, read ${how}. Speech model: ${model}.`;
+  $('#redoModel').value = $('#model').value === 'onnx-community/whisper-small_timestamped' ? $('#model').value : 'onnx-community/whisper-small_timestamped';
+  $('#redoLanguage').value = $('#language').value;
+});
+$('#hearBtn').addEventListener('click', () => {
+  if (!state.audio) return;
+  unlockAudio();
+  try { heard?.stop(); } catch {}
+  heard = playSamples(state.audio.samples, 0, 15);
+});
+$('#redoBtn').addEventListener('click', () => { $('#wrongPanel').hidden = true; redoCaptions(); });
 $('#wordDelete').addEventListener('click', () => {
   const w = selected();
   if (!w) return;
@@ -899,8 +960,8 @@ function loadFonts() {
 }
 buildPickers();
 syncSettings();
-// Phones: start with the smallest, fastest speech model (about 40 MB).
-if (isPhone()) $('#model').value = 'onnx-community/whisper-tiny_timestamped';
+// The Fast model invents words too often on real phone recordings, so every
+// device starts on Balanced (about 80 MB, downloaded once).
 // iOS only allows audio that starts in a tap, so unlock it on the first one.
 document.addEventListener('pointerdown', unlockAudio, { once: true, capture: true });
 loadFonts().then(draw);

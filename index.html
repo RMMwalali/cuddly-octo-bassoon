@@ -70,7 +70,7 @@
                 <select id="model">
                   <option value="onnx-community/whisper-tiny_timestamped">Fast (about 40 MB download)</option>
                   <option value="onnx-community/whisper-base_timestamped" selected>Balanced (about 80 MB)</option>
-                  <option value="onnx-community/whisper-small_timestamped">Best (about 250 MB, computers only)</option>
+                  <option value="onnx-community/whisper-small_timestamped">Best (about 250 MB)</option>
                 </select>
               </label>
               <div class="check">Already have captions?
@@ -178,7 +178,35 @@
             <button class="btn small primary" id="wordDone">Done</button>
           </div>
         </div>
-        <p class="help" id="wordsHelp">Click a word to jump there and adjust it.</p>
+        <p class="help" id="wordsHelp">Click a word to jump there and adjust it. <button class="link" id="wrongBtn" type="button">Words look wrong?</button></p>
+        <div class="wrong" id="wrongPanel" hidden>
+          <p id="wrongInfo"></p>
+          <button class="btn small" id="hearBtn" type="button">Hear what the app heard (first 15 s)</button>
+          <p class="help">If that sounds normal, redo the captions with a more accurate model. If it sounds garbled or silent, please send us the video type and your phone model.</p>
+          <div class="opt-grid">
+            <label>Model
+              <select id="redoModel">
+                <option value="onnx-community/whisper-tiny_timestamped">Fast</option>
+                <option value="onnx-community/whisper-base_timestamped">Balanced</option>
+                <option value="onnx-community/whisper-small_timestamped">Best (about 250 MB)</option>
+              </select>
+            </label>
+            <label>Language
+              <select id="redoLanguage">
+                <option value="auto">Detect automatically</option>
+                <option value="english">English</option>
+                <option value="swahili">Swahili</option>
+                <option value="french">French</option>
+                <option value="arabic">Arabic</option>
+                <option value="spanish">Spanish</option>
+                <option value="portuguese">Portuguese</option>
+                <option value="hindi">Hindi</option>
+                <option value="german">German</option>
+              </select>
+            </label>
+          </div>
+          <button class="btn primary small" id="redoBtn" type="button">Redo captions</button>
+        </div>
         <ol class="caps" id="caps"></ol>
       </div>
 

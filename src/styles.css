@@ -273,6 +273,9 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
 .rule.error .mark { background: #ff6b6b; }
 .rule ul { grid-column: 2; margin: 4px 0 0; padding-left: 16px; font-size: 13px; color: var(--muted); display: grid; gap: 4px; }
 .rule ul small { display: inline; }
+.wrong { background: var(--raise); border-radius: var(--r-md); padding: 12px; margin: 0 0 12px; display: grid; gap: 10px; }
+.wrong p { margin: 0; font-size: 13.5px; }
+.wrong .opt-grid { padding: 0; }
 .link { background: none; border: 0; padding: 0; color: var(--text); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; text-align: left; }
 
 /* ---------- toast */
@@ -335,6 +338,7 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
   .slider input { height: 32px; }
   .menu-list button { padding: 12px; }
   .who { min-height: 36px; }
+  #wrongBtn { display: inline-block; min-height: 40px; padding: 8px 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   .meter.indeterminate div { animation: none; width: 100%; opacity: 0.5; }
